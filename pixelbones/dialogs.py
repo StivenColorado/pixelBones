@@ -16,10 +16,10 @@ def set_host(app):
     HOST = app
 
 
-def _run(**kw):
+def _run(start_dir=None, **kw):
     global _LAST_DIR
     fb = FileBrowser(HOST.screen, HOST.clock, HOST.font, HOST.font_s,
-                     start_dir=_LAST_DIR, **kw)
+                     start_dir=start_dir or _LAST_DIR, **kw)
     res = fb.run()
     # recordar la carpeta usada para el proximo dialogo
     ref = res[0] if isinstance(res, list) and res else res
@@ -42,12 +42,12 @@ def open_project():
                 exts=(".pbproj",))
 
 
-def save_project_as():
+def save_project_as(start_dir=None):
     if HOST is None:
         return None
     cur = getattr(getattr(HOST, "project", None), "path", None)
     name = os.path.basename(cur) if cur else "animacion.pbproj"
-    return _run(title="Guardar proyecto como", mode="save",
+    return _run(start_dir=start_dir, title="Guardar proyecto como", mode="save",
                 exts=(".pbproj",), default_name=name)
 
 

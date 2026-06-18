@@ -142,10 +142,12 @@ class Bone:
         self.parent = -1                   # indice en project.bones | -1
         self.rest = default_pose()         # pose local en reposo
         self.length = 30.0                 # longitud (para dibujar el cilindro)
+        self.anchor = False                # punto de anclaje de items (mano, etc.)
 
     def to_dict(self):
         return {"name": self.name, "parent": self.parent,
-                "rest": clone_pose(self.rest), "length": self.length}
+                "rest": clone_pose(self.rest), "length": self.length,
+                "anchor": self.anchor}
 
     @classmethod
     def from_dict(cls, d):
@@ -153,6 +155,7 @@ class Bone:
         b.parent = d.get("parent", -1)
         b.rest = clone_pose(d.get("rest", default_pose()))
         b.length = d.get("length", 30.0)
+        b.anchor = d.get("anchor", False)
         return b
 
 
@@ -176,13 +179,54 @@ class Frame:
 
 
 # ---------------------------------------------------------------------------
+# Clip (animacion con nombre = una FILA de la hoja exportada)
+# ---------------------------------------------------------------------------
+class Clip:
+    def __init__(self, name="animacion", duration=1.0):
+        self.name = name
+        self.frames = []                   # [Frame]
+        self.duration = float(duration)    # segundos que dura la animacion
+        self.tile_w = None                 # ancho de frame propio (None = proyecto)
+        self.tile_h = None                 # alto de frame propio (None = proyecto)
+        self.box_x = None                  # esquina del recuadro (None = centrado)
+        self.box_y = None
+
+    @property
+    def fps(self):
+        return (len(self.frames) / self.duration) if self.duration > 0 else 0.0
+
+    def to_dict(self):
+        d = {"name": self.name, "duration": self.duration,
+             "frames": [f.to_dict() for f in self.frames]}
+        if self.tile_w:
+            d["tile_w"] = self.tile_w
+        if self.tile_h:
+            d["tile_h"] = self.tile_h
+        if self.box_x is not None:
+            d["box_x"] = self.box_x
+        if self.box_y is not None:
+            d["box_y"] = self.box_y
+        return d
+
+    @classmethod
+    def from_dict(cls, d):
+        c = cls(d.get("name", "animacion"), d.get("duration", 1.0))
+        c.frames = [Frame.from_dict(x) for x in d.get("frames", [])]
+        c.tile_w = d.get("tile_w")
+        c.tile_h = d.get("tile_h")
+        c.box_x = d.get("box_x")
+        c.box_y = d.get("box_y")
+        return c
+
+
+# ---------------------------------------------------------------------------
 # Project
 # ---------------------------------------------------------------------------
 class Project:
     def __init__(self):
         self.sprites = []
         self.bones = []
-        self.frames = []
+        self.clips = [Clip("animacion")]   # animaciones (filas de la hoja)
         self.drawings = []        # lienzos del modo Pintar (independientes)
         self.tile_w = 64
         self.tile_h = 128
@@ -236,12 +280,12 @@ class Project:
     # -- IO ------------------------------------------------------------------
     def to_dict(self):
         return {
-            "version": 3,
+            "version": 4,
             "tile_w": self.tile_w, "tile_h": self.tile_h,
             "box_x": self.box_x, "box_y": self.box_y, "fps": self.fps,
             "sprites": [s.to_dict() for s in self.sprites],
             "bones": [b.to_dict() for b in self.bones],
-            "frames": [f.to_dict() for f in self.frames],
+            "clips": [c.to_dict() for c in self.clips],
             "drawings": [d.to_dict() for d in self.drawings],
         }
 
@@ -256,10 +300,19 @@ class Project:
         if "sprites" in d or "bones" in d:
             pr.sprites = [Sprite.from_dict(s) for s in d.get("sprites", [])]
             pr.bones = [Bone.from_dict(b) for b in d.get("bones", [])]
-            pr.frames = [Frame.from_dict(f) for f in d.get("frames", [])]
+            if "clips" in d:
+                pr.clips = [Clip.from_dict(c) for c in d["clips"]]
+            else:                                 # v<=3: frames planos -> 1 clip
+                c = Clip("animacion")
+                c.frames = [Frame.from_dict(f) for f in d.get("frames", [])]
+                if c.frames and pr.fps:           # conservar la velocidad anterior
+                    c.duration = len(c.frames) / float(pr.fps)
+                pr.clips = [c]
             pr.drawings = [Sprite.from_dict(s) for s in d.get("drawings", [])]
         elif "parts" in d:
             pr._migrate_v1(d)
+        if not pr.clips:
+            pr.clips = [Clip("animacion")]
         if base_dir:
             for s in pr.sprites:
                 if s.image_path and not os.path.isabs(s.image_path):
@@ -281,7 +334,11 @@ class Project:
             s.z = pd.get("z", 0)
             s.visible = pd.get("visible", True)
             self.sprites.append(s)
-        self.frames = [Frame.from_dict(f) for f in d.get("frames", [])]
+        c = Clip("animacion")
+        c.frames = [Frame.from_dict(f) for f in d.get("frames", [])]
+        if c.frames and self.fps:
+            c.duration = len(c.frames) / float(self.fps)
+        self.clips = [c]
 
     def save(self, path):
         base = os.path.dirname(os.path.abspath(path))

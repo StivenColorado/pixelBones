@@ -13,7 +13,7 @@ import math
 import os
 import pygame
 
-from . import model, render, dialogs, recovery, paint
+from . import model, render, dialogs, recovery, paint, config
 from .history import History
 
 # ---- tema -----------------------------------------------------------------
@@ -57,6 +57,7 @@ class App:
         self.project = model.Project()
         self.sel_kind = None          # "sprite" | "bone" | None
         self.sel_idx = -1
+        self.cur_clip = 0             # animacion activa (project.clips)
         self.cur_frame = -1
         self.working = {}             # bone_name -> pose
 
@@ -91,6 +92,13 @@ class App:
         self.scroll_bone = 0
         self.scroll_draw = 0
         self.scroll_layer = 0
+        self.clipboard = None         # ("layer"|"pixels"|"sprite"|"bone", data)
+
+        # proyecto por defecto: editables en <root>/<src_dir>, export espejo a assets
+        _cfg = config.load()
+        self.project_root = _cfg.get("project_root")
+        self.src_dir = _cfg.get("src_dir", "art-src")
+        self.assets_dir = _cfg.get("assets_dir", "assets")
 
         self.zoom = 3.0
         self.cam_x = self.project.box_x + self.project.tile_w / 2
@@ -205,8 +213,12 @@ class App:
                 self.redo() if shift else self.undo()
             elif key == pygame.K_y:
                 self.redo()
+            elif key == pygame.K_c:
+                self.copy_active()
+            elif key == pygame.K_v:
+                self.paste_clipboard()
             elif key == pygame.K_d:
-                self.paint.sel_mask = None          # Ctrl+D deseleccionar
+                self.duplicate_active()
             return
         if key == pygame.K_TAB:
             self.toggle_mode()
@@ -318,6 +330,8 @@ class App:
         elif self.sel_kind == "bone" and self.selected_bone():
             self.editing = ("rename_bone", self.sel_idx)
             self.edit_buf = self.selected_bone().name
+        else:                                   # nada seleccionado: la animacion
+            self.rename_clip()
 
     def _edit_key(self, e):
         if e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
@@ -350,7 +364,7 @@ class App:
             self.project.bones[idx].name = new
             if old in self.working:
                 self.working[new] = self.working.pop(old)
-            for f in self.project.frames:
+            for f in self.all_frames():
                 if old in f.poses:
                     f.poses[new] = f.poses.pop(old)
             for s in self.project.sprites:
@@ -365,6 +379,10 @@ class App:
             if idx < len(self.project.drawings):
                 self.snapshot()
                 self.project.drawings[idx].name = self._unique_drawing_name(new)
+        elif kind == "rename_clip":
+            if idx < len(self.project.clips):
+                self.snapshot()
+                self.project.clips[idx].name = self._unique_clip_name(new, skip=idx)
         self._thumbs_dirty = True
 
     # ====================================================================
@@ -419,6 +437,7 @@ class App:
             self.right_w = w - mx
         elif self.split_drag == "time":
             self.time_h = h - my
+            self._thumbs_dirty = True
         elif self.split_drag == "leftsplit":
             self.left_split = max(0.18, min(0.82,
                                   (my - TOP_H) / max(1, (h - self.time_h - TOP_H))))
@@ -462,6 +481,21 @@ class App:
             return self.project.bones[self.sel_idx]
         return None
 
+    # -- clips (animaciones) ---------------------------------------------
+    @property
+    def clip(self):
+        if 0 <= self.cur_clip < len(self.project.clips):
+            return self.project.clips[self.cur_clip]
+        return None
+
+    @property
+    def frames(self):
+        c = self.clip
+        return c.frames if c else []
+
+    def all_frames(self):
+        return [f for c in self.project.clips for f in c.frames]
+
     def pose_for(self):
         def lookup(idx):
             name = self.project.bones[idx].name
@@ -474,15 +508,15 @@ class App:
         return f
 
     def active_frame(self):
-        if self.playing and self.project.frames:
-            return self.project.frames[self.play_i % len(self.project.frames)]
+        if self.playing and self.frames:
+            return self.frames[self.play_i % len(self.frames)]
         return self.display_frame()
 
     def sync_working(self):
         self.working = {}
         for b in self.project.bones:
             if self.cur_frame >= 0:
-                fr = self.project.frames[self.cur_frame]
+                fr = self.frames[self.cur_frame]
                 self.working[b.name] = model.clone_pose(fr.poses.get(b.name, b.rest))
             else:
                 self.working[b.name] = model.clone_pose(b.rest)
@@ -491,7 +525,7 @@ class App:
         name = self.project.bones[bone_idx].name
         pose = model.clone_pose(self.working[name])
         if self.cur_frame >= 0:
-            self.project.frames[self.cur_frame].poses[name] = pose
+            self.frames[self.cur_frame].poses[name] = pose
             self._thumbs_dirty = True
         else:
             self.project.bones[bone_idx].rest = pose
@@ -508,7 +542,8 @@ class App:
         self.project = model.Project.from_dict(d)
         render.ensure_surfaces(self.project)
         self.sel_kind, self.sel_idx = None, -1
-        self.cur_frame = min(self.cur_frame, len(self.project.frames) - 1)
+        self.cur_clip = max(0, min(self.cur_clip, len(self.project.clips) - 1))
+        self.cur_frame = min(self.cur_frame, len(self.frames) - 1)
         self.editing = None
         self.sync_working()
         self.paint_undo.clear()
@@ -704,7 +739,7 @@ class App:
             if s.bone == target.name:
                 self.bind_sprite_inplace_unbind(s, target.name)
         self.working.pop(target.name, None)
-        for f in self.project.frames:
+        for f in self.all_frames():
             f.poses.pop(target.name, None)
         self.sel_kind, self.sel_idx = None, -1
         self._thumbs_dirty = True
@@ -733,20 +768,114 @@ class App:
             self.delete_bone(self.sel_idx)
 
     # ====================================================================
+    # copiar / pegar / duplicar (Ctrl+C / Ctrl+V / Ctrl+D)
+    # ====================================================================
+    def copy_active(self):
+        if self.mode == "paint":
+            sp, layer = self._active_layer()
+            if layer is None:
+                return
+            if self.paint.sel_mask is not None:     # copiar solo lo seleccionado
+                w, h = layer.surface.get_size()
+                surf = pygame.Surface((w, h), pygame.SRCALPHA)
+                m = self.paint.sel_mask
+                for yy in range(h):
+                    for xx in range(w):
+                        if m.get_at((xx, yy)):
+                            surf.set_at((xx, yy), layer.surface.get_at((xx, yy)))
+                self.clipboard = ("pixels", surf)
+                self.status = "Seleccion copiada (pega como capa con Ctrl+V)."
+            else:
+                self.clipboard = ("layer", layer.clone())
+                self.status = f"Capa '{layer.name}' copiada."
+        else:
+            if self.sel_kind == "sprite" and self.selected_sprite():
+                self.clipboard = ("sprite", self.selected_sprite().to_dict())
+                self.status = "Material copiado."
+            elif self.sel_kind == "bone" and self.selected_bone():
+                self.clipboard = ("bone", self.selected_bone().to_dict())
+                self.status = "Hueso copiado."
+
+    def paste_clipboard(self):
+        cb = self.clipboard
+        if not cb:
+            return
+        kind = cb[0]
+        if kind in ("layer", "pixels"):
+            if self.mode != "paint":
+                self.status = "Cambia a modo Pintar (Tab) para pegar la capa."
+                return
+            if self.paint_target() is None:
+                self.new_drawing()
+            sp = self.paint_target()
+            self.snapshot()
+            if kind == "layer":
+                lay = cb[1].clone()
+            else:
+                lay = model.Layer("pegado", cb[1].copy())
+            sp.layers.insert(sp.active_layer + 1, lay)
+            sp.active_layer += 1
+            self.paint_undo.clear(); self.paint_redo.clear()
+            render.flatten_sprite(sp)
+            self._thumbs_dirty = True
+            self.status = "Pegado como capa nueva."
+        elif kind == "sprite":
+            if self.mode != "animate":
+                return
+            self.snapshot()
+            sp = model.Sprite.from_dict(cb[1])
+            sp.name = self.project.unique_sprite_name(sp.name)
+            sp.bone = None                      # pega libre, sin vinculo
+            sp.transform = dict(sp.transform)
+            sp.transform["x"] += 8; sp.transform["y"] += 8
+            sp.z = len(self.project.sprites)
+            render.load_sprite_surface(sp, (self.project.tile_w, self.project.tile_h))
+            self.project.sprites.append(sp)
+            self.sel_kind, self.sel_idx = "sprite", len(self.project.sprites) - 1
+            self._thumbs_dirty = True
+            self.status = f"Material '{sp.name}' pegado."
+        elif kind == "bone":
+            if self.mode != "animate":
+                return
+            self.snapshot()
+            b = model.Bone.from_dict(cb[1])
+            b.name = self.project.unique_bone_name(b.name)
+            b.rest = dict(b.rest)
+            b.rest["x"] += 8; b.rest["y"] += 8
+            self.project.bones.append(b)
+            self.working[b.name] = model.clone_pose(b.rest)
+            self.sel_kind, self.sel_idx = "bone", len(self.project.bones) - 1
+            self._thumbs_dirty = True
+            self.status = f"Hueso '{b.name}' pegado."
+
+    def duplicate_active(self):
+        if self.mode == "paint":
+            self.layer_duplicate()
+            return
+        if self.sel_kind == "sprite" and self.selected_sprite():
+            self.copy_active(); self.paste_clipboard()
+        elif self.sel_kind == "bone" and self.selected_bone():
+            self.copy_active(); self.paste_clipboard()
+        elif self.cur_frame >= 0:
+            self.duplicate_frame(self.cur_frame)
+        else:
+            self.status = "Nada que duplicar (selecciona material, hueso o frame)."
+
+    # ====================================================================
     # frames
     # ====================================================================
     def capture_frame(self):
         self.snapshot()
-        f = model.Frame(f"f{len(self.project.frames)+1}")
+        f = model.Frame(f"f{len(self.frames)+1}")
         for b in self.project.bones:
             f.poses[b.name] = model.clone_pose(self.working.get(b.name, b.rest))
-        self.project.frames.append(f)
+        self.frames.append(f)
         # quedarse en modo LIVE (no seleccionar el frame recien creado): asi el
         # siguiente 'posar -> capturar' genera un frame DISTINTO en vez de
         # sobrescribir el que se acaba de capturar. La pose actual se conserva.
         self.cur_frame = -1
         self._thumbs_dirty = True
-        self.status = (f"Frame {len(self.project.frames)} capturado. Sigue "
+        self.status = (f"Frame {len(self.frames)} capturado. Sigue "
                        "posando y captura otro; o clic en un frame para editarlo.")
 
     def select_frame(self, i):
@@ -754,48 +883,184 @@ class App:
         self.sync_working()
 
     def delete_frame(self, i):
-        if 0 <= i < len(self.project.frames):
+        if 0 <= i < len(self.frames):
             self.snapshot()
-            del self.project.frames[i]
-            self.cur_frame = min(self.cur_frame, len(self.project.frames) - 1)
+            del self.frames[i]
+            self.cur_frame = min(self.cur_frame, len(self.frames) - 1)
             self.sync_working()
             self._thumbs_dirty = True
 
     def duplicate_frame(self, i):
-        if 0 <= i < len(self.project.frames):
+        if 0 <= i < len(self.frames):
             self.snapshot()
-            src = self.project.frames[i]
+            src = self.frames[i]
             f = model.Frame(src.name + "*")
             f.poses = {k: model.clone_pose(v) for k, v in src.poses.items()}
-            self.project.frames.insert(i + 1, f)
+            self.frames.insert(i + 1, f)
             self.cur_frame = i + 1
             self.sync_working()
             self._thumbs_dirty = True
 
     def move_frame(self, i, d):
         j = i + d
-        if 0 <= i < len(self.project.frames) and 0 <= j < len(self.project.frames):
+        if 0 <= i < len(self.frames) and 0 <= j < len(self.frames):
             self.snapshot()
-            fr = self.project.frames
+            fr = self.frames
             fr[i], fr[j] = fr[j], fr[i]
             self.cur_frame = j
             self._thumbs_dirty = True
 
     def toggle_play(self):
-        if not self.project.frames:
+        if not self.frames:
             return
         self.playing = not self.playing
         self.play_t = 0.0
         self.play_i = 0
 
     def _update_play(self, dt):
-        if not self.playing or not self.project.frames:
+        if not self.playing or not self.frames:
             return
+        n = len(self.frames)
+        dur = self.clip.duration if self.clip else 1.0
+        step = max(0.02, dur / max(1, n))      # reparte la duracion entre los frames
         self.play_t += dt
-        step = 1.0 / max(1, self.project.fps)
         if self.play_t >= step:
             self.play_t -= step
-            self.play_i = (self.play_i + 1) % len(self.project.frames)
+            self.play_i = (self.play_i + 1) % n
+
+    # -- clips / animaciones ---------------------------------------------
+    def _unique_clip_name(self, base, skip=-1):
+        names = {c.name for j, c in enumerate(self.project.clips) if j != skip}
+        return self.project._unique(base, names)
+
+    def _pose_from_frame(self, frame):
+        """working = pose del frame dado (o de reposo si frame es None)."""
+        self.working = {}
+        for b in self.project.bones:
+            if frame is not None and b.name in frame.poses:
+                self.working[b.name] = model.clone_pose(frame.poses[b.name])
+            else:
+                self.working[b.name] = model.clone_pose(b.rest)
+
+    def add_clip(self, seed_idx=None):
+        """Crea una animacion basada en un frame (sin reproceso):
+        - si hay un frame seleccionado (o se indica seed_idx), parte de ese;
+        - si no, parte del PRIMER frame de la animacion actual;
+        - si no hay frames, parte del reposo.
+        Ese frame se siembra como el primero de la nueva animacion."""
+        src = self.frames
+        if seed_idx is None:
+            seed_idx = self.cur_frame if self.cur_frame >= 0 else (0 if src else None)
+        base = src[seed_idx] if (seed_idx is not None and 0 <= seed_idx < len(src)) else None
+        self.snapshot()
+        clip = model.Clip(self._unique_clip_name("animacion"))
+        if base is not None:
+            f = model.Frame("f1")
+            f.poses = {k: model.clone_pose(v) for k, v in base.poses.items()}
+            clip.frames.append(f)
+        self.project.clips.append(clip)
+        self.cur_clip = len(self.project.clips) - 1
+        self.cur_frame = -1
+        self.playing = False
+        self._pose_from_frame(base)
+        self._thumbs_dirty = True
+        self.status = (f"Animacion '{clip.name}' creada desde un frame base; "
+                       "posa y captura los siguientes."
+                       if base is not None else f"Animacion '{clip.name}' creada.")
+
+    def select_clip(self, i):
+        if 0 <= i < len(self.project.clips) and i != self.cur_clip:
+            self.cur_clip = i
+            self.playing = False
+            # mostrar el PRIMER frame como punto de partida
+            self.cur_frame = 0 if self.clip.frames else -1
+            self.sync_working()
+            self._thumbs_dirty = True
+
+    def delete_clip(self, i):
+        if len(self.project.clips) <= 1 or not (0 <= i < len(self.project.clips)):
+            return
+        self.snapshot()
+        del self.project.clips[i]
+        self.cur_clip = max(0, min(self.cur_clip, len(self.project.clips) - 1))
+        self.cur_frame = -1
+        self.playing = False
+        self.sync_working()
+        self._thumbs_dirty = True
+
+    def rename_clip(self):
+        if self.clip:
+            self.editing = ("rename_clip", self.cur_clip)
+            self.edit_buf = self.clip.name
+
+    def _content_box(self, clip, margin=4):
+        """bbox en mundo (bx, by, w, h) que contiene TODO el contenido de todos
+        los frames del clip, con margen. None si no hay contenido."""
+        sprites = [s for s in self.project.sprites
+                   if s.visible and s.surface is not None and s.content_rect]
+        if not sprites:
+            return None
+        frames = clip.frames or [None]
+        minx = miny = 1e9
+        maxx = maxy = -1e9
+        for f in frames:
+            pose_for = model.pose_for_frame(self.project, f)
+            for sp in sprites:
+                wt = model.sprite_world(self.project, sp, pose_for)
+                cx, cy, cw, ch = sp.content_rect
+                for ix, iy in ((cx, cy), (cx + cw, cy),
+                               (cx + cw, cy + ch), (cx, cy + ch)):
+                    ox, oy = model._rot((ix - sp.pivot[0]) * wt[3],
+                                        (iy - sp.pivot[1]) * wt[3], wt[2])
+                    px, py = wt[0] + ox, wt[1] + oy
+                    minx, maxx = min(minx, px), max(maxx, px)
+                    miny, maxy = min(miny, py), max(maxy, py)
+        if minx > maxx:
+            return None
+        return (minx - margin, miny - margin,
+                (maxx - minx) + 2 * margin, (maxy - miny) + 2 * margin)
+
+    def fit_clip_to_content(self, margin=4):
+        """Ajusta el recuadro de la animacion activa para contener todos sus
+        frames (lo que se sale por arriba o por los lados). Sin recortes."""
+        clip = self.clip
+        cb = self._content_box(clip, margin) if clip else None
+        if cb is None:
+            self.status = "No hay contenido para ajustar."
+            return
+        self.snapshot()
+        clip.box_x = math.floor(cb[0])
+        clip.box_y = math.floor(cb[1])
+        clip.tile_w = int(math.ceil(cb[0] + cb[2])) - clip.box_x
+        clip.tile_h = int(math.ceil(cb[1] + cb[3])) - clip.box_y
+        self._thumbs_dirty = True
+        self.status = (f"'{clip.name}' ajustado a {clip.tile_w}x{clip.tile_h} "
+                       "(sin recortes).")
+
+    def ensure_clips_fit(self, margin=4):
+        """Expande (nunca encoge) el recuadro de cada animacion para que el
+        contenido NUNCA se recorte. Se llama al exportar. Devuelve cuantas
+        animaciones se agrandaron."""
+        changed = 0
+        for clip in self.project.clips:
+            cb = self._content_box(clip, margin)
+            if cb is None:
+                continue
+            cur = render.clip_box(self.project, clip)
+            x0, y0 = min(cur[0], cb[0]), min(cur[1], cb[1])
+            x1 = max(cur[0] + cur[2], cb[0] + cb[2])
+            y1 = max(cur[1] + cur[3], cb[1] + cb[3])
+            nw, nh = int(math.ceil(x1 - x0)), int(math.ceil(y1 - y0))
+            if (nw > int(round(cur[2])) or nh > int(round(cur[3]))
+                    or x0 < cur[0] - 0.5 or y0 < cur[1] - 0.5):
+                if changed == 0:
+                    self.snapshot()
+                clip.box_x, clip.box_y = math.floor(x0), math.floor(y0)
+                clip.tile_w, clip.tile_h = nw, nh
+                changed += 1
+        if changed:
+            self._thumbs_dirty = True
+        return changed
 
     # ====================================================================
     # archivo
@@ -803,7 +1068,9 @@ class App:
     def new_project(self):
         self.project = model.Project()
         self.sel_kind, self.sel_idx = None, -1
+        self.cur_clip = 0
         self.cur_frame = -1
+        self.draw_idx = -1
         self.working = {}
         self.history.clear()
         self.dirty = False
@@ -811,6 +1078,35 @@ class App:
         recovery.clear()
         self._thumbs_dirty = True
         self.status = "Proyecto nuevo."
+
+    # -- proyecto por defecto (art-src <-> assets) -----------------------
+    def set_project(self):
+        d = dialogs.choose_dir()
+        if not d:
+            return
+        self.project_root = d
+        config.save({"project_root": d, "src_dir": self.src_dir,
+                     "assets_dir": self.assets_dir})
+        self.status = (f"Proyecto: {os.path.basename(d)}  (editables en "
+                       f"{self.src_dir}/, export a {self.assets_dir}/)")
+
+    def src_root(self):
+        if self.project_root:
+            return os.path.join(self.project_root, self.src_dir)
+        return None
+
+    def _mirror_path(self, ext):
+        """Ruta espejo en <root>/<assets_dir> del .pbproj actual (si esta bajo
+        <root>/<src_dir>). Devuelve None si no aplica."""
+        if not (self.project_root and self.project.path):
+            return None
+        src = os.path.abspath(self.src_root())
+        p = os.path.abspath(self.project.path)
+        if not (p == src or p.startswith(src + os.sep)):
+            return None
+        rel = os.path.relpath(p, src)
+        return os.path.join(self.project_root, self.assets_dir,
+                            os.path.splitext(rel)[0] + ext)
 
     def _load_path(self, path):
         try:
@@ -820,7 +1116,9 @@ class App:
             return
         render.ensure_surfaces(self.project)
         self.sel_kind, self.sel_idx = None, -1
+        self.cur_clip = 0
         self.cur_frame = -1
+        self.draw_idx = -1
         self.sync_working()
         self.history.clear()
         self.dirty = False
@@ -835,7 +1133,8 @@ class App:
     def save_project(self, as_new=False):
         path = self.project.path
         if as_new or not path:
-            path = dialogs.save_project_as()
+            start = self.src_root() if (self.project_root and not path) else None
+            path = dialogs.save_project_as(start_dir=start)
         if not path:
             return
         try:
@@ -850,12 +1149,24 @@ class App:
         if not self.project.sprites:
             self.status = "No hay imagenes para exportar."
             return
-        path = dialogs.save_png_as()
-        if not path:
-            return
+        nfit = self.ensure_clips_fit()            # nunca recortar
+        auto = self._mirror_path(".png")          # espejo art-src -> assets
+        if auto:
+            path = auto
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        else:
+            path = dialogs.save_png_as()
+            if not path:
+                return
         try:
-            sz = render.export_composite(self.project, path, self.export_cols)
-            self.status = f"Exportado {sz[0]}x{sz[1]}: {os.path.basename(path)}"
+            sz = render.export_composite(self.project, path)
+            render.export_meta(self.project, os.path.splitext(path)[0] + ".json")
+            shown = (os.path.relpath(path, self.project_root)
+                     if self.project_root and auto else os.path.basename(path))
+            extra = f" · ajuste {nfit} anim." if nfit else ""
+            self.status = (f"Exportado {sz[0]}x{sz[1]} "
+                           f"({len(self.project.clips)} fila/s) -> {shown} + .json"
+                           + extra)
         except Exception as e:
             self.status = f"Error export: {e}"
 
@@ -863,12 +1174,20 @@ class App:
         if not self.project.sprites:
             self.status = "No hay imagenes para exportar."
             return
-        d = dialogs.choose_dir()
-        if not d:
-            return
+        self.ensure_clips_fit()                   # nunca recortar
+        auto = self._mirror_path(".png")
+        if auto:
+            d = os.path.dirname(auto)             # carpeta espejo en assets/
+            os.makedirs(d, exist_ok=True)
+        else:
+            d = dialogs.choose_dir()
+            if not d:
+                return
         try:
-            files = render.export_per_layer(self.project, d, self.export_cols)
-            self.status = f"{len(files)} hojas por capa exportadas."
+            files = render.export_per_layer(self.project, d)
+            render.export_meta(self.project, os.path.join(d, "metadata.json"))
+            self.status = (f"{len(files)} hojas por capa (filas = animaciones) "
+                           f"+ metadata.json -> {os.path.basename(d)}/")
         except Exception as e:
             self.status = f"Error export: {e}"
 
@@ -1806,9 +2125,14 @@ class App:
         pygame.draw.rect(self.screen, CANVAS_BG, c)
         self.screen.set_clip(c)
         self._draw_grid()
-        bx, by = self.w2s(self.project.box_x, self.project.box_y)
-        box = pygame.Rect(int(bx), int(by), int(self.project.tile_w * self.zoom),
-                          int(self.project.tile_h * self.zoom))
+        # recuadro de exportacion de la ANIMACION activa (puede ser mas ancho)
+        cbx, cby, ccw, cch = (render.clip_box(self.project, self.clip)
+                              if self.clip else
+                              (self.project.box_x, self.project.box_y,
+                               self.project.tile_w, self.project.tile_h))
+        bx, by = self.w2s(cbx, cby)
+        box = pygame.Rect(int(bx), int(by), int(ccw * self.zoom),
+                          int(cch * self.zoom))
         pygame.draw.rect(self.screen, (24, 26, 32), box)
         self._draw_grid(box)
         pygame.draw.rect(self.screen, ACCENT, box, 1)
@@ -1834,7 +2158,7 @@ class App:
                     "link": "ENLACE (C)", "hand": "MANO (H)"}.get(self.tool, self.tool)
         self.text(tool_lbl, (c.x + 56, c.y + 8), ACCENT, font=self.font_b)
         fr = ("Reposo" if self.cur_frame < 0
-              else f"Frame {self.cur_frame+1}/{len(self.project.frames)}")
+              else f"Frame {self.cur_frame+1}/{len(self.frames)}")
         self.text(fr, (c.right - 10, c.y + 8), TEXT, font=self.font_b, right=True)
 
     def _draw_grid(self, clip=None):
@@ -2162,7 +2486,15 @@ class App:
             if self.button(pygame.Rect(x, 5, w, 26), label):
                 fn()
             x += w + 4
-        x += 10
+        x += 6
+        proj = (os.path.basename(self.project_root) if self.project_root
+                else "(ninguno)")
+        plabel = f"Proyecto: {proj}"
+        w = self.font_s.size(plabel)[0] + 16
+        if self.button(pygame.Rect(x, 5, w, 26), plabel,
+                       active=bool(self.project_root)):
+            self.set_project()
+        x += w + 8
         if self.button(pygame.Rect(x, 5, 124, 26), "+ Importar imagen",
                        active=True):
             self.import_images()
@@ -2173,12 +2505,7 @@ class App:
             if self.button(pygame.Rect(x, 5, w, 26), label):
                 fn()
             x += w + 4
-        self.text("cols", (x + 4, 12), DIM, font=self.font_s)
-        v, ch = self.scrub("excols", pygame.Rect(x + 34, 5, 50, 26),
-                           self.export_cols, 0.1)
-        if ch:
-            self.export_cols = max(0, int(round(v)))
-        x += 92
+        x += 8
         if self.button(pygame.Rect(x, 5, 66, 26), "Deshacer",
                        enabled=self.history.can_undo()):
             self.undo()
@@ -2247,7 +2574,7 @@ class App:
             y, dele = self._list_row(
                 p, y, b.name, sel, True,
                 lambda i=idx: self._sel("bone", i), None,
-                indent=depth * 10)
+                indent=depth * 10, tag="ancla" if b.anchor else "")
             if dele:
                 pending_delete = ("bone", idx)
         self._scrollbar(brect, sc2, nb, rows2, maxs2)
@@ -2729,7 +3056,7 @@ class App:
         if self.button(pygame.Rect(x, y, w, 24), "Aplanar -> PNG nuevo"):
             self.flatten_to_new()
         y += 28
-        if self.button(pygame.Rect(x, y, w, 24), "Quitar seleccion (Ctrl+D)",
+        if self.button(pygame.Rect(x, y, w, 24), "Quitar seleccion (Esc)",
                        enabled=self.paint.sel_mask is not None):
             self.paint.sel_mask = None
 
@@ -2759,7 +3086,7 @@ class App:
         self.text("TILE / PROYECTO", (x, y), ACCENT, font=self.font_s)
         y += 20
         for key, lbl, step in (("tile_w", "Tile ancho", 0.25),
-                               ("tile_h", "Tile alto", 0.25), ("fps", "FPS", 0.05)):
+                               ("tile_h", "Tile alto", 0.25)):
             self.text(lbl, (x + 4, y + 4), TEXT, font=self.font_s)
             v, ch = self.scrub("g_" + key, pygame.Rect(x + 90, y, w - 90, 22),
                                getattr(self.project, key), step)
@@ -2889,6 +3216,18 @@ class App:
         if ch:
             b.length = max(1.0, v); self.dirty = True
         y += 30
+        # anclaje de items (la mano, etc.): se exporta su transform por frame
+        self.text("Anclaje item", (x + 4, y + 4), TEXT, font=self.font_s)
+        if self.button(pygame.Rect(x + 90, y, w - 90, 22),
+                       "SI - exporta anchor" if b.anchor else "no",
+                       active=b.anchor):
+            self.snapshot(); b.anchor = not b.anchor; self.dirty = True
+        y += 22
+        if b.anchor:
+            self.text("El item seguira este hueso (pos/rot) por frame.",
+                      (x + 4, y), DIM, font=self.font_s)
+            y += 16
+        y += 6
         dest = "frame" if self.cur_frame >= 0 else "reposo"
         self.text(f"POSE (-> {dest})", (x, y), ACCENT, font=self.font_s)
         y += 20
@@ -2907,21 +3246,73 @@ class App:
     # -- timeline --------------------------------------------------------
     def _rebuild_thumbs(self):
         self._thumbs = []
-        th = 80
-        frames = self.project.frames
-        for f in frames:
-            tile = render.render_tile(self.project, f)
+        th = getattr(self, "_thumb_h", 70)
+        box = render.clip_box(self.project, self.clip) if self.clip else None
+        for f in self.frames:
+            tile = render.render_tile(self.project, f, box=box)
             tw, hh = tile.get_size()
             sc = th / hh if hh else 1
             self._thumbs.append(pygame.transform.smoothscale(
                 tile, (max(1, int(tw * sc)), th)))
         self._thumbs_dirty = False
 
+    def _draw_clip_tabs(self, p):
+        """Pestanas de animaciones (cada una = una fila de la hoja)."""
+        tx, ty = 8, p.y + 4
+        for i, c in enumerate(self.project.clips):
+            editing = (self.editing and self.editing[0] == "rename_clip"
+                       and self.editing[1] == i)
+            txt = self.edit_buf if editing else f"{c.name} ({len(c.frames)})"
+            wtab = self.font_s.size(txt)[0] + 16
+            tab = pygame.Rect(tx, ty, wtab, 20)
+            active = (i == self.cur_clip)
+            col = ACTIVE if active else (HOVER if tab.collidepoint(self.mouse)
+                                         else PANEL2)
+            pygame.draw.rect(self.screen, col, tab, border_radius=3)
+            if editing:
+                caret = "|" if (pygame.time.get_ticks() // 400) % 2 else ""
+                self.text(self.edit_buf + caret, (tab.x + 6, tab.centery - 7),
+                          TEXT, font=self.font_s)
+            else:
+                self.text(txt, (tab.x + 6, tab.centery - 7),
+                          TEXT if active else DIM, font=self.font_s)
+            if self.lmb_down and tab.collidepoint(self.mouse):
+                self.rename_clip() if active else self.select_clip(i)
+            tx += wtab + 4
+        if self.button(pygame.Rect(tx, ty, 26, 20), "+"):
+            self.add_clip()
+        tx += 30
+        if len(self.project.clips) > 1:
+            if self._icon_button(pygame.Rect(tx, ty, 24, 20), "trash"):
+                self.delete_clip(self.cur_clip)
+            tx += 28
+        # tamano de frame de ESTA animacion (atacar puede necesitar mas ancho)
+        if self.clip:
+            self.text("Frame", (tx, ty + 4), DIM, font=self.font_s)
+            tx += 42
+            _, _, cw, ch = render.clip_box(self.project, self.clip)
+            v, chg = self.scrub("clipw", pygame.Rect(tx, ty, 44, 20), cw, 0.25, "{:.0f}")
+            if chg:
+                self.clip.tile_w = max(8, int(round(v))); self._thumbs_dirty = True
+            tx += 46
+            self.text("x", (tx, ty + 4), DIM, font=self.font_s)
+            tx += 10
+            v, chg = self.scrub("cliph", pygame.Rect(tx, ty, 44, 20), ch, 0.25, "{:.0f}")
+            if chg:
+                self.clip.tile_h = max(8, int(round(v))); self._thumbs_dirty = True
+            tx += 48
+            if self.button(pygame.Rect(tx, ty, 58, 20), "Ajustar"):
+                self.fit_clip_to_content()
+            tx += 62
+        self.text("(Ajustar = recuadro que contiene todos los frames)",
+                  (p.right - 8, ty + 4), DIM, font=self.font_s, right=True)
+
     def _draw_timeline(self):
         p = self.r_time
         pygame.draw.rect(self.screen, PANEL, p)
         pygame.draw.line(self.screen, LINE, (0, p.y), (p.right, p.y))
-        x, y = 8, p.y + 6
+        self._draw_clip_tabs(p)
+        x, y = 8, p.y + 28
         canf = self.cur_frame >= 0
         if self._icon_button(pygame.Rect(x, y, 54, 24), "capture", "K"):
             self.capture_frame()
@@ -2929,8 +3320,7 @@ class App:
         if self._icon_button(pygame.Rect(x, y, 28, 24), "duplicate", enabled=canf):
             self.duplicate_frame(self.cur_frame)
         x += 32
-        if self._icon_button(pygame.Rect(x, y, 28, 24), "trash",
-                             enabled=canf):
+        if self._icon_button(pygame.Rect(x, y, 28, 24), "trash", enabled=canf):
             self.delete_frame(self.cur_frame)
         x += 32
         if self._icon_button(pygame.Rect(x, y, 26, 24), "prev", enabled=canf):
@@ -2948,14 +3338,26 @@ class App:
                              active=self.cur_frame < 0):
             self.cur_frame = -1
             self.sync_working()
-        x += 48
-        self.text(f"{len(self.project.frames)} frames  |  {self.status}",
+        x += 46
+        # duracion (segundos) de la animacion activa
+        if self.clip:
+            self.text("Dur(s)", (x, y + 5), DIM, font=self.font_s)
+            x += 42
+            v, ch = self.scrub("clipdur", pygame.Rect(x, y, 52, 24),
+                               self.clip.duration, 0.02, "{:.2f}")
+            if ch:
+                self.clip.duration = max(0.05, v)
+            x += 56
+            self.text(f"{self.clip.fps:.0f} fps", (x, y + 5), DIM, font=self.font_s)
+            x += 46
+        self.text(f"{len(self.frames)} frames  |  {self.status}",
                   (x, y + 5), DIM, font=self.font_s)
 
+        sy = p.y + 56
+        self._thumb_h = max(36, p.bottom - sy - 8)
         if self._thumbs_dirty:
             self._rebuild_thumbs()
         sx = 8
-        sy = p.y + 38
         for i, thumb in enumerate(self._thumbs):
             rect = pygame.Rect(sx, sy, thumb.get_width() + 4, thumb.get_height() + 4)
             ph = self.playing and self._thumbs and (self.play_i % len(self._thumbs)) == i
@@ -3005,7 +3407,10 @@ class App:
             "5) Mueve/rota huesos y pulsa Capturar (K) por frame. Exporta PNG.",
             "",
             "V seleccion  B hueso  C enlace  H mano (paneo)  K capturar  Espacio play",
-            "Supr borrar   F2 renombrar   Esc nada   Rueda zoom   Ctrl al rotar = 15",
+            "Supr borrar   F2 renombrar (material/hueso/animacion)   Rueda zoom",
+            "Ctrl+C / Ctrl+V / Ctrl+D: copiar / pegar / duplicar material o hueso.",
+            "Animaciones = pestanas del timeline. '+' crea una nueva animacion",
+            "   basada en el frame seleccionado (o el 1o); clic en la activa renombra.",
             "Ctrl+S guardar  Ctrl+Shift+S guardar como  Ctrl+O abrir",
             "Ctrl+E exportar  Ctrl+Z deshacer  Ctrl+Y rehacer",
             "",
@@ -3018,8 +3423,9 @@ class App:
             "[ ] o Ctrl+rueda = tamano de pincel    X = cambia color activo/2do",
             "Curva: clic agrega nodos; clic derecho o Enter cierra; Esc cancela.",
             "Seleccion (S): arrastra un rectangulo (Shift suma, Ctrl resta); arrastra",
-            "   dentro para MOVER el contenido; clic simple deselecciona.",
-            "Vara magica selecciona la region de color; Ctrl+D deselecciona.",
+            "   dentro para MOVER el contenido; clic simple o Esc deselecciona.",
+            "Vara magica selecciona la region de color (Esc deselecciona).",
+            "Ctrl+C/Ctrl+V copia/pega capa (o la seleccion); Ctrl+D duplica.",
             "Para retocar un material existente: en sus Propiedades, 'Editar en Pintar'.",
             "",
             "Recuadro NARANJA = area exportada (tile). Solo se exportan imagenes.",

@@ -3,6 +3,7 @@ huesos son guias de rig (se dibujan como overlay en el editor, no se exportan).
 """
 
 from __future__ import annotations
+import json
 import math
 import os
 import pygame
@@ -108,47 +109,111 @@ def draw_sprites(dest, project, frame, world_to_screen, zoom=1.0,
                     scale=wscale * zoom)
 
 
-def render_tile(project, frame, sprites_filter=None):
-    tile = pygame.Surface((project.tile_w, project.tile_h), pygame.SRCALPHA)
-    bx, by = project.box_x, project.box_y
+def clip_box(project, clip):
+    """Recuadro de exportacion (bx, by, w, h) de un clip. Si el clip tiene
+    esquina propia (box_x/box_y, p.ej. tras 'Ajustar al contenido') se usa esa;
+    si no, se centra en el mismo centro que el recuadro del proyecto."""
+    pw, ph = project.tile_w, project.tile_h
+    cw = getattr(clip, "tile_w", None) or pw
+    ch = getattr(clip, "tile_h", None) or ph
+    bx = getattr(clip, "box_x", None)
+    by = getattr(clip, "box_y", None)
+    if bx is not None and by is not None:
+        return (bx, by, cw, ch)
+    cx = project.box_x + pw / 2.0
+    cy = project.box_y + ph / 2.0
+    return (cx - cw / 2.0, cy - ch / 2.0, cw, ch)
+
+
+def render_tile(project, frame, sprites_filter=None, box=None):
+    if box is None:
+        box = (project.box_x, project.box_y, project.tile_w, project.tile_h)
+    bx, by, w, h = box
+    tile = pygame.Surface((max(1, int(round(w))), max(1, int(round(h)))),
+                          pygame.SRCALPHA)
     draw_sprites(tile, project, frame, lambda x, y: (x - bx, y - by),
                  zoom=1.0, sprites_filter=sprites_filter)
     return tile
 
 
-def pack_sheet(tiles, columns=0):
-    if not tiles:
-        return pygame.Surface((1, 1), pygame.SRCALPHA)
-    tw, th = tiles[0].get_size()
-    n = len(tiles)
-    if columns <= 0:
-        cols, rows = n, 1
-    else:
-        cols = columns
-        rows = (n + cols - 1) // cols
-    sheet = pygame.Surface((cols * tw, rows * th), pygame.SRCALPHA)
-    for i, t in enumerate(tiles):
-        sheet.blit(t, ((i % cols) * tw, (i // cols) * th))
+def pack_clips_sheet(project, sprites_filter=None):
+    """Hoja unica con UNA FILA POR ANIMACION (clip). Cada fila usa el tamano de
+    frame de su clip (puede ser mas ancho/alto). El ancho de la hoja lo fija la
+    fila mas larga; el alto es la suma de los altos de cada fila."""
+    clips = project.clips or [model.Clip("animacion")]
+    rows = []
+    total_h, max_w = 0, 0
+    for c in clips:
+        bx, by, cw, ch = clip_box(project, c)
+        nf = max(1, len(c.frames))
+        rows.append((c, bx, by, cw, ch))
+        total_h += int(round(ch))
+        max_w = max(max_w, nf * int(round(cw)))
+    sheet = pygame.Surface((max(1, max_w), max(1, total_h)), pygame.SRCALPHA)
+    y = 0
+    for c, bx, by, cw, ch in rows:
+        cw_i, ch_i = int(round(cw)), int(round(ch))
+        frames = c.frames if c.frames else [None]
+        for i, f in enumerate(frames):
+            tile = render_tile(project, f, sprites_filter, (bx, by, cw, ch))
+            sheet.blit(tile, (i * cw_i, y))
+        y += ch_i
     return sheet
 
 
-def export_composite(project, out_path, columns=0):
-    frames = project.frames or [None]
-    tiles = [render_tile(project, f) for f in frames]
-    sheet = pack_sheet(tiles, columns)
+def build_meta(project):
+    """Metadata de la hoja para el juego (sidecar JSON).
+
+    Incluye, por animacion (fila) y por frame, el transform de los huesos
+    marcados como ANCLA (mano, etc.) en pixeles del tile: posicion del nodo
+    (x,y), angulo en grados (ang, horario), escala, y la punta (tx,ty). El
+    juego coloca cualquier arma en ese transform -> se siente sostenida.
+    """
+    anchors = [(i, b) for i, b in enumerate(project.bones)
+               if getattr(b, "anchor", False)]
+    meta = {"frame_w": project.tile_w, "frame_h": project.tile_h, "rows": []}
+    for c in (project.clips or []):
+        bx, by, cw, ch = clip_box(project, c)        # anchors relativos a ESTA fila
+        frames = c.frames or [None]
+        row = {"name": c.name, "frames": max(1, len(c.frames)),
+               "frame_w": int(round(cw)), "frame_h": int(round(ch)),
+               "origin": [round(-bx, 2), round(-by, 2)],   # mundo (0,0) en el frame
+               "duration": round(c.duration, 3), "fps": round(c.fps, 2)}
+        if anchors:
+            row["anchors"] = {}
+            for i, b in anchors:
+                seq = []
+                for f in frames:
+                    pose_for = model.pose_for_frame(project, f)
+                    wx, wy, wrot, wsc = model.bone_world(project, i, pose_for)
+                    tx, ty = model.bone_tip(project, i, (wx, wy, wrot, wsc))
+                    seq.append({"x": round(wx - bx, 2), "y": round(wy - by, 2),
+                                "ang": round(wrot, 2), "scale": round(wsc, 3),
+                                "tx": round(tx - bx, 2), "ty": round(ty - by, 2)})
+                row["anchors"][b.name] = seq
+        meta["rows"].append(row)
+    return meta
+
+
+def export_meta(project, path):
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(build_meta(project), fh, indent=2, ensure_ascii=False)
+    return path
+
+
+def export_composite(project, out_path):
+    sheet = pack_clips_sheet(project)
     pygame.image.save(sheet, out_path)
     return sheet.get_size()
 
 
-def export_per_layer(project, out_dir, columns=0):
+def export_per_layer(project, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     written = []
-    frames = project.frames or [None]
     for idx, sp in enumerate(project.sprites):
         if sp.surface is None:
             continue
-        tiles = [render_tile(project, f, sprites_filter={idx}) for f in frames]
-        sheet = pack_sheet(tiles, columns)
+        sheet = pack_clips_sheet(project, sprites_filter={idx})
         safe = "".join(ch if ch.isalnum() or ch in "-_" else "_"
                        for ch in sp.name)
         path = os.path.join(out_dir, f"{safe}.png")
