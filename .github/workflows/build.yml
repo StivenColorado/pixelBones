@@ -1,8 +1,10 @@
 name: build
 
-# Compila ejecutables para Windows (.exe), Linux y macOS.
-# - En cada push de un tag vX.Y.Z los sube a la Release de ese tag.
-# - Tambien se puede lanzar a mano (workflow_dispatch) para descargar artifacts.
+# Compila ejecutables listos para descargar y abrir:
+#   - Windows: PixelBones-windows.exe   (doble clic)
+#   - Linux:   PixelBones-x86_64.AppImage (doble clic; portable)
+#   - macOS:   PixelBones-macos
+# En cada push de un tag vX.Y.Z los adjunta a la Release de ese tag.
 on:
   push:
     tags: ['v*']
@@ -18,14 +20,13 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            out: dist/PixelBones.exe
             asset: PixelBones-windows.exe
+            src: dist/PixelBones.exe
           - os: ubuntu-latest
-            out: dist/PixelBones
-            asset: PixelBones-linux
+            asset: PixelBones-x86_64.AppImage
           - os: macos-latest
-            out: dist/PixelBones
             asset: PixelBones-macos
+            src: dist/PixelBones
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -34,9 +35,41 @@ jobs:
           python-version: '3.12'
       - run: pip install pygame-ce pyinstaller pillow
       - run: pyinstaller --noconfirm --clean PixelBones.spec
-      - name: Renombrar binario
+
+      # Windows / macOS: el binario tal cual
+      - name: Renombrar binario (Win/macOS)
+        if: matrix.os != 'ubuntu-latest'
         shell: bash
-        run: cp "${{ matrix.out }}" "${{ matrix.asset }}"
+        run: cp "${{ matrix.src }}" "${{ matrix.asset }}"
+
+      # Linux: empaquetar como AppImage (doble clic, portable)
+      - name: Empaquetar AppImage (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -e
+          APP=AppDir
+          mkdir -p "$APP/usr/bin"
+          cp dist/PixelBones "$APP/usr/bin/PixelBones"
+          cp docs/icon.png "$APP/PixelBones.png"
+          cat > "$APP/PixelBones.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=PixelBones
+          Exec=PixelBones
+          Icon=PixelBones
+          Categories=Graphics;
+          Terminal=false
+          EOF
+          cat > "$APP/AppRun" <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/PixelBones" "$@"
+          EOF
+          chmod +x "$APP/AppRun" "$APP/usr/bin/PixelBones"
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$APP" "${{ matrix.asset }}"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}

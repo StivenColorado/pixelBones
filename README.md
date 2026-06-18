@@ -17,11 +17,11 @@ Descarga el ejecutable de tu sistema desde la página de
 **[Releases](https://github.com/StivenColorado/pixelBones/releases)** y ábrelo —
 no necesitas Python ni instalar dependencias:
 
-| Sistema | Archivo |
-|---|---|
-| Windows | `PixelBones-windows.exe` (doble clic) |
-| Linux | `PixelBones-linux` (`chmod +x` y ejecutar) |
-| macOS | `PixelBones-macos` |
+| Sistema | Archivo | Cómo abrir |
+|---|---|---|
+| Windows | `PixelBones-windows.exe` | doble clic |
+| Linux | `PixelBones-x86_64.AppImage` | doble clic (portable; si pide, marca "permitir ejecución" una vez) |
+| macOS | `PixelBones-macos` | doble clic |
 
 > Los binarios los compila automáticamente GitHub Actions en cada versión
 > (Windows/Linux/macOS). Si prefieres correrlo desde el código, ve a
