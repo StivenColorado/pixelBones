@@ -10,26 +10,64 @@ import pygame
 from . import model
 
 
-def load_sprite_surface(sprite):
-    if not sprite.image_path or not os.path.isfile(sprite.image_path):
+def ensure_layers(sprite, default_size=(64, 128)):
+    """Garantiza que el sprite tenga al menos una capa raster editable.
+    Si trae image_path (import o proyecto v2) la carga como capa 'base';
+    si no, crea un lienzo transparente del tamano dado."""
+    if sprite.layers:
+        return
+    surf = None
+    if sprite.image_path and os.path.isfile(sprite.image_path):
+        try:
+            surf = pygame.image.load(sprite.image_path).convert_alpha()
+        except pygame.error:
+            surf = None
+    if surf is None:
+        w, h = default_size
+        surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    sprite.layers = [model.Layer("base", surf)]
+    sprite.active_layer = 0
+
+
+def flatten_sprite(sprite):
+    """Compone las capas visibles en sprite.surface y recomputa content_rect."""
+    if not sprite.layers or sprite.layers[0].surface is None:
         sprite.surface = None
         sprite.size = (0, 0)
         sprite.content_rect = None
         return
-    surf = pygame.image.load(sprite.image_path).convert_alpha()
-    sprite.surface = surf
-    sprite.size = surf.get_size()
-    # bbox del contenido real (pixeles con alpha) -> para centrar el pivote
-    bb = surf.get_bounding_rect(min_alpha=1)
+    w, h = sprite.layers[0].surface.get_size()
+    comp = pygame.Surface((w, h), pygame.SRCALPHA)
+    for lay in sprite.layers:
+        if not lay.visible or lay.surface is None:
+            continue
+        s = lay.surface
+        if lay.opacity < 0.999:
+            s = lay.surface.copy()
+            a = max(0, min(255, int(255 * lay.opacity)))
+            s.fill((255, 255, 255, a), special_flags=pygame.BLEND_RGBA_MULT)
+        comp.blit(s, (0, 0))
+    sprite.surface = comp
+    sprite.size = (w, h)
+    bb = comp.get_bounding_rect(min_alpha=1)
     if bb.width == 0 or bb.height == 0:
-        bb = surf.get_rect()
+        bb = comp.get_rect()
     sprite.content_rect = (bb.x, bb.y, bb.width, bb.height)
 
 
+def load_sprite_surface(sprite, default_size=(64, 128)):
+    ensure_layers(sprite, default_size)
+    flatten_sprite(sprite)
+
+
 def ensure_surfaces(project):
+    ds = (project.tile_w, project.tile_h)
     for s in project.sprites:
-        if s.surface is None and s.image_path:
-            load_sprite_surface(s)
+        if s.surface is None:
+            load_sprite_surface(s, ds)
+    for s in getattr(project, "drawings", []):
+        if s.surface is None:
+            load_sprite_surface(s, ds)
 
 
 def blit_rotate(dest, image, screen_pos, pivot, angle_deg, scale=1.0):

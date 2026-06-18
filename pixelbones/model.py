@@ -13,9 +13,13 @@ horaria en pantalla.
 """
 
 from __future__ import annotations
+import base64
 import json
 import math
 import os
+import zlib
+
+import pygame
 
 
 def default_pose():
@@ -34,6 +38,60 @@ def _rot(x, y, deg):
 
 
 # ---------------------------------------------------------------------------
+# Codec de pixeles (capas): RGBA crudo comprimido (zlib) en base64.
+# Mantiene el .pbproj autocontenido y portable.
+# ---------------------------------------------------------------------------
+_to_bytes = getattr(pygame.image, "tobytes", None) or pygame.image.tostring
+_from_bytes = getattr(pygame.image, "frombytes", None) or pygame.image.fromstring
+
+
+def encode_surface(surf):
+    w, h = surf.get_size()
+    raw = _to_bytes(surf, "RGBA")
+    return {"w": w, "h": h,
+            "pix": base64.b64encode(zlib.compress(raw, 6)).decode("ascii")}
+
+
+def decode_surface(d):
+    w, h, pix = d.get("w", 0), d.get("h", 0), d.get("pix")
+    if not (pix and w and h):
+        return None
+    raw = zlib.decompress(base64.b64decode(pix))
+    surf = _from_bytes(raw, (w, h), "RGBA")
+    if pygame.display.get_init():
+        surf = surf.convert_alpha()
+    return surf
+
+
+# ---------------------------------------------------------------------------
+# Layer (capa raster de un sprite, estilo Pixelorama)
+# ---------------------------------------------------------------------------
+class Layer:
+    def __init__(self, name="capa", surface=None, visible=True, opacity=1.0):
+        self.name = name
+        self.visible = visible
+        self.opacity = float(opacity)
+        self.surface = surface          # pygame.Surface SRCALPHA
+
+    def clone(self):
+        c = Layer(self.name, None, self.visible, self.opacity)
+        if self.surface is not None:
+            c.surface = self.surface.copy()
+        return c
+
+    def to_dict(self):
+        d = {"name": self.name, "visible": self.visible, "opacity": self.opacity}
+        if self.surface is not None:
+            d.update(encode_surface(self.surface))
+        return d
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(d.get("name", "capa"), decode_surface(d),
+                   d.get("visible", True), d.get("opacity", 1.0))
+
+
+# ---------------------------------------------------------------------------
 # Sprite (imagen)
 # ---------------------------------------------------------------------------
 class Sprite:
@@ -46,8 +104,10 @@ class Sprite:
         self.local = default_pose()        # offset relativo al hueso (si bone)
         self.z = 0
         self.visible = True
+        self.layers = []               # list[Layer]; vacia => se crea al cargar
+        self.active_layer = 0
         # runtime (no se serializa)
-        self.surface = None
+        self.surface = None            # composicion de las capas visibles
         self.size = (0, 0)
         self.content_rect = None       # bbox de pixeles no transparentes
 
@@ -55,7 +115,9 @@ class Sprite:
         return {"name": self.name, "image_path": self.image_path,
                 "pivot": list(self.pivot), "transform": clone_pose(self.transform),
                 "bone": self.bone, "local": clone_pose(self.local),
-                "z": self.z, "visible": self.visible}
+                "z": self.z, "visible": self.visible,
+                "layers": [l.to_dict() for l in self.layers],
+                "active_layer": self.active_layer}
 
     @classmethod
     def from_dict(cls, d):
@@ -66,6 +128,8 @@ class Sprite:
         s.local = clone_pose(d.get("local", default_pose()))
         s.z = d.get("z", 0)
         s.visible = d.get("visible", True)
+        s.layers = [Layer.from_dict(ld) for ld in d.get("layers", [])]
+        s.active_layer = d.get("active_layer", 0)
         return s
 
 
@@ -119,6 +183,7 @@ class Project:
         self.sprites = []
         self.bones = []
         self.frames = []
+        self.drawings = []        # lienzos del modo Pintar (independientes)
         self.tile_w = 64
         self.tile_h = 128
         self.box_x = -32.0
@@ -171,12 +236,13 @@ class Project:
     # -- IO ------------------------------------------------------------------
     def to_dict(self):
         return {
-            "version": 2,
+            "version": 3,
             "tile_w": self.tile_w, "tile_h": self.tile_h,
             "box_x": self.box_x, "box_y": self.box_y, "fps": self.fps,
             "sprites": [s.to_dict() for s in self.sprites],
             "bones": [b.to_dict() for b in self.bones],
             "frames": [f.to_dict() for f in self.frames],
+            "drawings": [d.to_dict() for d in self.drawings],
         }
 
     @classmethod
@@ -191,6 +257,7 @@ class Project:
             pr.sprites = [Sprite.from_dict(s) for s in d.get("sprites", [])]
             pr.bones = [Bone.from_dict(b) for b in d.get("bones", [])]
             pr.frames = [Frame.from_dict(f) for f in d.get("frames", [])]
+            pr.drawings = [Sprite.from_dict(s) for s in d.get("drawings", [])]
         elif "parts" in d:
             pr._migrate_v1(d)
         if base_dir:

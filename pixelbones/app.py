@@ -13,7 +13,7 @@ import math
 import os
 import pygame
 
-from . import model, render, dialogs, recovery
+from . import model, render, dialogs, recovery, paint
 from .history import History
 
 # ---- tema -----------------------------------------------------------------
@@ -60,9 +60,37 @@ class App:
         self.cur_frame = -1
         self.working = {}             # bone_name -> pose
 
-        self.tool = "select"          # select | bone
+        self.tool = "select"          # select | bone | link  (modo animar)
+        self.link_bone = None         # hueso origen durante el enlace de 2 clics
         self.show_bones = True
         self.show_help = False
+
+        # --- modo Pintar (raster, estilo Pixelorama) -------------------
+        self.mode = "animate"         # animate | paint
+        self.ptool = "pencil"         # herramienta de pintura activa
+        self.paint = paint.PaintState()
+        self.draw_idx = -1            # dibujo activo del taller (project.drawings)
+        self.pzoom = 8.0              # zoom de la vista de lienzo (plano)
+        self.pcx = 32.0              # centro de la vista en px de lienzo
+        self.pcy = 64.0
+        self.paint_undo = []          # [(sprite, layer, surface_copy)]
+        self.paint_redo = []
+        self.line_anchor = None       # estado de linea/curva en curso
+        self._cursor = None
+        self._sv_key = None           # cache del cuadro Saturacion/Valor
+        self._sv_surf = None
+        self._hue_surf = None
+
+        # paneles redimensionables (soldados) + scroll de listas
+        self.left_w = LEFT_W
+        self.right_w = RIGHT_W
+        self.time_h = TIME_H
+        self.left_split = 0.5         # fraccion del panel izq para la lista de arriba
+        self.split_drag = None        # "left"|"right"|"time"|"leftsplit"
+        self.scroll_img = 0
+        self.scroll_bone = 0
+        self.scroll_draw = 0
+        self.scroll_layer = 0
 
         self.zoom = 3.0
         self.cam_x = self.project.box_x + self.project.tile_w / 2
@@ -94,6 +122,7 @@ class App:
         self.prev_mouse = (0, 0)
         self.lmb_down = False
         self.lmb_held = False
+        self.rmb_down = False
         self.wheel = 0
 
         self._thumbs = []
@@ -112,9 +141,11 @@ class App:
             dt = self.clock.tick(60) / 1000.0
             self._poll_events()
             self._update_play(dt)
-            self._handle_canvas()
+            if not self._handle_splitters():
+                self._handle_canvas()
             self._autosave_tick()
             self.update_caption()
+            self._update_cursor()
             self._draw()
             self.prev_mouse = self.mouse
             pygame.display.flip()
@@ -122,6 +153,7 @@ class App:
 
     def _poll_events(self):
         self.lmb_down = False
+        self.rmb_down = False
         self.wheel = 0
         dropped = []
         for e in pygame.event.get():
@@ -135,8 +167,10 @@ class App:
             elif e.type == pygame.MOUSEBUTTONDOWN:
                 if e.button == 1:
                     self.lmb_down = True
+                elif e.button == 3:
+                    self.rmb_down = True
                 elif e.button == 2:
-                    self.pan = (e.pos, self.cam_x, self.cam_y)
+                    self.pan = (e.pos, self.cam_x, self.cam_y, self.pcx, self.pcy)
             elif e.type == pygame.MOUSEBUTTONUP:
                 if e.button == 2:
                     self.pan = None
@@ -171,13 +205,28 @@ class App:
                 self.redo() if shift else self.undo()
             elif key == pygame.K_y:
                 self.redo()
+            elif key == pygame.K_d:
+                self.paint.sel_mask = None          # Ctrl+D deseleccionar
             return
-        if key == pygame.K_v:
-            self.tool = "select"
-        elif key == pygame.K_b:
-            self.tool = "bone"
-        elif key == pygame.K_h or key == pygame.K_F1:
+        if key == pygame.K_TAB:
+            self.toggle_mode()
+            return
+        if key == pygame.K_F1:
             self.show_help = not self.show_help
+            return
+        if self.mode == "paint":
+            self._hotkey_paint(key)
+            return
+        # ---- modo ANIMAR ----
+        if key == pygame.K_v:
+            self.tool, self.link_bone = "select", None
+        elif key == pygame.K_b:
+            self.tool, self.link_bone = "bone", None
+        elif key == pygame.K_c:
+            self.tool, self.link_bone = "link", None
+            self.status = "Enlace: clic en un hueso y luego en una imagen."
+        elif key == pygame.K_h:
+            self.tool, self.link_bone = "hand", None
         elif key == pygame.K_k:
             self.capture_frame()
         elif key == pygame.K_SPACE:
@@ -187,7 +236,79 @@ class App:
         elif key == pygame.K_F2:
             self.rename_selected()
         elif key == pygame.K_ESCAPE:
-            self.sel_kind, self.sel_idx = None, -1
+            if self.link_bone is not None:
+                self.link_bone = None
+                self.status = "Enlace cancelado."
+            else:
+                self.sel_kind, self.sel_idx = None, -1
+
+    PAINT_KEYS = {
+        pygame.K_p: "pencil", pygame.K_e: "eraser", pygame.K_c: "shade",
+        pygame.K_b: "bucket", pygame.K_o: "eyedropper", pygame.K_h: "hand",
+        pygame.K_l: "line", pygame.K_j: "curve", pygame.K_w: "wand",
+        pygame.K_s: "select", pygame.K_m: "move",
+    }
+
+    def _hotkey_paint(self, key):
+        if key in self.PAINT_KEYS:
+            self.ptool = self.PAINT_KEYS[key]
+            self.line_anchor = None
+            return
+        if key == pygame.K_LEFTBRACKET:
+            self.paint.brush = max(1, self.paint.brush - 1)
+        elif key == pygame.K_RIGHTBRACKET:
+            self.paint.brush = min(32, self.paint.brush + 1)
+        elif key == pygame.K_x:
+            self.paint.color, self.paint.color2 = self.paint.color2, self.paint.color
+        elif key == pygame.K_DELETE:
+            self.paint_clear_pixels()
+        elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self.commit_curve()
+        elif key == pygame.K_F2:
+            self.rename_active_layer()
+        elif key == pygame.K_ESCAPE:
+            if self.line_anchor is not None:
+                self.line_anchor = None
+            else:
+                self.paint.sel_mask = None
+
+    # -- modos -----------------------------------------------------------
+    def toggle_mode(self):
+        if self.mode == "animate":
+            self.mode = "paint"
+            self.playing = False
+            self.paint.sel_mask = None
+            self.line_anchor = None
+            if self.paint_target() is None:
+                if self.project.drawings:
+                    self.draw_idx = 0
+                else:
+                    self.status = ("Taller de dibujo. Crea uno con 'Nuevo "
+                                   "dibujo' y, al terminar, 'Enviar como material'.")
+            self._fit_canvas_view()
+            if self.paint_target() is not None:
+                self.status = "Modo PINTAR (taller). Tab vuelve a Animar."
+        else:
+            self.mode = "animate"
+            self.line_anchor = None
+            self.status = "Modo ANIMAR."
+
+    def paint_target(self):
+        """Dibujo activo del taller (independiente de los materiales)."""
+        if 0 <= self.draw_idx < len(self.project.drawings):
+            return self.project.drawings[self.draw_idx]
+        return None
+
+    def _fit_canvas_view(self):
+        sp = self.paint_target()
+        if sp is None or sp.surface is None:
+            self.pcx, self.pcy = 32.0, 64.0
+            return
+        w, h = sp.size
+        self.pcx, self.pcy = w / 2.0, h / 2.0
+        c = getattr(self, "r_canvas", None)
+        if c and c.w and c.h and w and h:
+            self.pzoom = max(1.0, min(24.0, min((c.w - 60) / w, (c.h - 60) / h)))
 
     # -- edicion de texto inline -----------------------------------------
     def rename_selected(self):
@@ -235,6 +356,15 @@ class App:
             for s in self.project.sprites:
                 if s.bone == old:
                     s.bone = new
+        elif kind == "rename_layer":
+            sp = self.paint_target()
+            if sp and idx < len(sp.layers):
+                self.snapshot()
+                sp.layers[idx].name = new
+        elif kind == "rename_drawing":
+            if idx < len(self.project.drawings):
+                self.snapshot()
+                self.project.drawings[idx].name = self._unique_drawing_name(new)
         self._thumbs_dirty = True
 
     # ====================================================================
@@ -242,13 +372,72 @@ class App:
     # ====================================================================
     def layout(self):
         w, h = self.screen.get_size()
+        # clamps para que ningun panel se coma el lienzo
+        self.time_h = max(90, min(h - TOP_H - 120, self.time_h))
+        self.left_w = max(150, min(w - self.right_w - 200, self.left_w))
+        self.right_w = max(180, min(w - self.left_w - 200, self.right_w))
+        body_h = h - TOP_H - self.time_h
         self.r_top = pygame.Rect(0, 0, w, TOP_H)
-        self.r_time = pygame.Rect(0, h - TIME_H, w, TIME_H)
-        self.r_left = pygame.Rect(0, TOP_H, LEFT_W, h - TOP_H - TIME_H)
-        self.r_right = pygame.Rect(w - RIGHT_W, TOP_H, RIGHT_W,
-                                   h - TOP_H - TIME_H)
-        self.r_canvas = pygame.Rect(LEFT_W, TOP_H, w - LEFT_W - RIGHT_W,
-                                    h - TOP_H - TIME_H)
+        self.r_time = pygame.Rect(0, h - self.time_h, w, self.time_h)
+        self.r_left = pygame.Rect(0, TOP_H, self.left_w, body_h)
+        self.r_right = pygame.Rect(w - self.right_w, TOP_H, self.right_w, body_h)
+        self.r_canvas = pygame.Rect(self.left_w, TOP_H,
+                                    w - self.left_w - self.right_w, body_h)
+
+    # bordes arrastrables entre paneles (siempre soldados)
+    def _splitter_rects(self):
+        w, h = self.screen.get_size()
+        body_top, body_bot = TOP_H, h - self.time_h
+        sy = body_top + int((body_bot - body_top) * self.left_split)
+        return {
+            "left":  pygame.Rect(self.left_w - 3, body_top, 6, body_bot - body_top),
+            "right": pygame.Rect(w - self.right_w - 3, body_top, 6,
+                                 body_bot - body_top),
+            "time":  pygame.Rect(0, h - self.time_h - 3, w, 6),
+            "leftsplit": pygame.Rect(0, sy - 3, self.left_w, 6),
+        }
+
+    def _handle_splitters(self):
+        w, h = self.screen.get_size()
+        rects = self._splitter_rects()
+        if self.split_drag is None and self.lmb_down:
+            # prioridad: bordes principales antes que el interno
+            for key in ("left", "right", "time", "leftsplit"):
+                if rects[key].collidepoint(self.mouse):
+                    self.split_drag = key
+                    self.lmb_down = False     # no activar widgets debajo
+                    break
+        if self.split_drag is None:
+            return False
+        if not self.lmb_held:
+            self.split_drag = None
+            return False
+        mx, my = self.mouse
+        if self.split_drag == "left":
+            self.left_w = mx
+        elif self.split_drag == "right":
+            self.right_w = w - mx
+        elif self.split_drag == "time":
+            self.time_h = h - my
+        elif self.split_drag == "leftsplit":
+            self.left_split = max(0.18, min(0.82,
+                                  (my - TOP_H) / max(1, (h - self.time_h - TOP_H))))
+        self.layout()
+        return True
+
+    def _draw_splitters(self):
+        for key, r in self._splitter_rects().items():
+            hot = r.collidepoint(self.mouse) or self.split_drag == key
+            col = ACCENT if (self.split_drag == key) else (HOVER if hot else LINE)
+            if key in ("left", "right"):
+                x = r.centerx
+                pygame.draw.line(self.screen, col, (x, r.y + 2), (x, r.bottom - 2),
+                                 2 if hot else 1)
+            else:
+                y = r.centery
+                x2 = self.left_w if key == "leftsplit" else self.screen.get_width()
+                pygame.draw.line(self.screen, col, (r.x, y), (x2, y),
+                                 2 if hot else 1)
 
     def w2s(self, wx, wy):
         c = self.r_canvas
@@ -322,16 +511,37 @@ class App:
         self.cur_frame = min(self.cur_frame, len(self.project.frames) - 1)
         self.editing = None
         self.sync_working()
+        self.paint_undo.clear()
+        self.paint_redo.clear()
         self._thumbs_dirty = True
         self.dirty = True
 
     def undo(self):
+        # en modo Pintar, Ctrl+Z deshace primero los trazos de pixel
+        if self.mode == "paint" and self.paint_undo:
+            sp, layer, before = self.paint_undo.pop()
+            self.paint_redo.append((sp, layer, layer.surface.copy()))
+            layer.surface = before
+            render.flatten_sprite(sp)
+            self._thumbs_dirty = True
+            self.dirty = True
+            self.status = "Deshacer (pixeles)."
+            return
         d = self.history.undo(self.project.to_dict())
         if d is not None:
             self._restore(d)
             self.status = "Deshacer."
 
     def redo(self):
+        if self.mode == "paint" and self.paint_redo:
+            sp, layer, after = self.paint_redo.pop()
+            self.paint_undo.append((sp, layer, layer.surface.copy()))
+            layer.surface = after
+            render.flatten_sprite(sp)
+            self._thumbs_dirty = True
+            self.dirty = True
+            self.status = "Rehacer (pixeles)."
+            return
         d = self.history.redo(self.project.to_dict())
         if d is not None:
             self._restore(d)
@@ -531,9 +741,13 @@ class App:
         for b in self.project.bones:
             f.poses[b.name] = model.clone_pose(self.working.get(b.name, b.rest))
         self.project.frames.append(f)
-        self.cur_frame = len(self.project.frames) - 1
+        # quedarse en modo LIVE (no seleccionar el frame recien creado): asi el
+        # siguiente 'posar -> capturar' genera un frame DISTINTO en vez de
+        # sobrescribir el que se acaba de capturar. La pose actual se conserva.
+        self.cur_frame = -1
         self._thumbs_dirty = True
-        self.status = f"Frame {self.cur_frame+1} capturado."
+        self.status = (f"Frame {len(self.project.frames)} capturado. Sigue "
+                       "posando y captura otro; o clic en un frame para editarlo.")
 
     def select_frame(self, i):
         self.cur_frame = i
@@ -733,6 +947,39 @@ class App:
             self.bind_sprite(sprite_idx, best)
             self.status = f"'{sp.name}' vinculado a '{best}'."
 
+    def _link_press(self):
+        """Herramienta Enlace (2 clics): 1) un hueso, 2) una imagen."""
+        if self.link_bone is None or self.link_bone >= len(self.project.bones):
+            hb = self._hit_bone(*self.mouse)
+            if hb is not None:
+                self.link_bone = hb[0]
+                self.sel_kind, self.sel_idx = "bone", hb[0]
+                name = self.project.bones[hb[0]].name
+                self.status = (f"Hueso '{name}' elegido. Clic en una imagen "
+                               "para enlazarla. (Esc cancela)")
+            else:
+                self.status = "Enlace: primero haz clic en un hueso."
+            return
+        # segundo clic: la imagen
+        hs = self._hit_sprite(*self.mouse)
+        if hs >= 0:
+            bone_name = self.project.bones[self.link_bone].name
+            self.bind_sprite(hs, bone_name)
+            self.sel_kind, self.sel_idx = "sprite", hs
+            self.status = (f"'{self.project.sprites[hs].name}' enlazado a "
+                           f"'{bone_name}'.")
+            self.link_bone = None
+            return
+        hb = self._hit_bone(*self.mouse)
+        if hb is not None:                       # clic en otro hueso: cambia origen
+            self.link_bone = hb[0]
+            self.sel_kind, self.sel_idx = "bone", hb[0]
+            self.status = ("Hueso de origen cambiado. Clic en una imagen "
+                           "para enlazarla.")
+        else:
+            self.link_bone = None
+            self.status = "Enlace cancelado (clic en vacio)."
+
     def pivot_to_content(self, sprite_idx):
         """Coloca el pivote en el centro del contenido visible (mascara)."""
         sp = self.project.sprites[sprite_idx]
@@ -745,15 +992,592 @@ class App:
         self.status = "Pivote centrado en el contenido."
 
     # ====================================================================
-    # interaccion del canvas
+    # modo Pintar: capas, vista de lienzo y herramientas raster
+    # ====================================================================
+    def pc2s(self, cx, cy):
+        c = self.r_canvas
+        return (c.centerx + (cx - self.pcx) * self.pzoom,
+                c.centery + (cy - self.pcy) * self.pzoom)
+
+    def s2pc(self, sx, sy):
+        c = self.r_canvas
+        return (self.pcx + (sx - c.centerx) / self.pzoom,
+                self.pcy + (sy - c.centery) / self.pzoom)
+
+    def _canvas_pixel(self):
+        fx, fy = self.s2pc(*self.mouse)
+        return int(math.floor(fx)), int(math.floor(fy))
+
+    def _active_layer(self):
+        sp = self.paint_target()
+        if sp is None or not sp.layers:
+            return None, None
+        i = max(0, min(sp.active_layer, len(sp.layers) - 1))
+        return sp, sp.layers[i]
+
+    def _paint_push_undo(self, sp, layer):
+        self.paint_undo.append((sp, layer, layer.surface.copy()))
+        if len(self.paint_undo) > 80:
+            self.paint_undo.pop(0)
+        self.paint_redo.clear()
+
+    def _after_paint(self, sp):
+        render.flatten_sprite(sp)
+        self.dirty = True
+        self._thumbs_dirty = True
+
+    def _set_color_from_hsv(self):
+        import colorsys
+        r, g, b = colorsys.hsv_to_rgb(self.paint.hue, self.paint.sat, self.paint.val)
+        self.paint.color = (int(r * 255), int(g * 255), int(b * 255),
+                            self.paint.color[3])
+
+    def _sync_hsv_from_color(self):
+        import colorsys
+        r, g, b, _ = self.paint.color
+        self.paint.hue, self.paint.sat, self.paint.val = \
+            colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+
+    def _pick_color(self, col):
+        self.paint.color = tuple(col)
+        self._sync_hsv_from_color()
+
+    def _update_cursor(self):
+        want = pygame.SYSTEM_CURSOR_ARROW
+        over = self.r_canvas.collidepoint(self.mouse)
+        # cursores de redimension sobre los bordes
+        sr = self._splitter_rects()
+        if self.split_drag in ("left", "right") or (self.split_drag is None and (
+                sr["left"].collidepoint(self.mouse)
+                or sr["right"].collidepoint(self.mouse))):
+            want = pygame.SYSTEM_CURSOR_SIZEWE
+        elif self.split_drag in ("time", "leftsplit") or (self.split_drag is None
+                and (sr["time"].collidepoint(self.mouse)
+                     or sr["leftsplit"].collidepoint(self.mouse))):
+            want = pygame.SYSTEM_CURSOR_SIZENS
+        elif self.mode == "paint" and over:
+            if self.ptool == "hand":
+                want = pygame.SYSTEM_CURSOR_HAND
+            elif self.ptool == "move":
+                want = pygame.SYSTEM_CURSOR_SIZEALL
+            else:
+                want = pygame.SYSTEM_CURSOR_CROSSHAIR
+        elif self.mode == "animate" and over and self.tool == "hand":
+            want = pygame.SYSTEM_CURSOR_HAND
+        elif self.mode == "animate" and over and self.tool == "link":
+            want = pygame.SYSTEM_CURSOR_CROSSHAIR
+        if self._cursor != want:
+            try:
+                pygame.mouse.set_cursor(want)
+            except Exception:
+                pass
+            self._cursor = want
+
+    def layer_duplicate(self):
+        sp = self.paint_target()
+        if sp is None or not sp.layers:
+            return
+        self.snapshot()
+        src = sp.layers[sp.active_layer]
+        dup = src.clone()
+        dup.name = src.name + " copia"
+        sp.layers.insert(sp.active_layer + 1, dup)
+        sp.active_layer += 1
+        self.paint_undo.clear()
+        self.paint_redo.clear()
+        render.flatten_sprite(sp)
+        self._thumbs_dirty = True
+
+    # -- capas (del dibujo activo) ---------------------------------------
+    def layer_add(self):
+        sp = self.paint_target()
+        if sp is None:
+            return
+        self.snapshot()
+        render.ensure_layers(sp, (self.project.tile_w, self.project.tile_h))
+        w, h = sp.layers[0].surface.get_size()
+        lay = model.Layer(f"capa {len(sp.layers) + 1}",
+                          pygame.Surface((w, h), pygame.SRCALPHA))
+        sp.layers.insert(sp.active_layer + 1, lay)
+        sp.active_layer += 1
+        self.paint_undo.clear()
+        self.paint_redo.clear()
+        render.flatten_sprite(sp)
+        self._thumbs_dirty = True
+
+    def layer_delete(self, i):
+        sp = self.paint_target()
+        if sp is None or len(sp.layers) <= 1 or not (0 <= i < len(sp.layers)):
+            return
+        self.snapshot()
+        del sp.layers[i]
+        sp.active_layer = min(sp.active_layer, len(sp.layers) - 1)
+        self.paint_undo.clear()
+        self.paint_redo.clear()
+        render.flatten_sprite(sp)
+        self._thumbs_dirty = True
+
+    def layer_move(self, i, d):
+        sp = self.paint_target()
+        if sp is None:
+            return
+        j = i + d
+        if 0 <= i < len(sp.layers) and 0 <= j < len(sp.layers):
+            self.snapshot()
+            sp.layers[i], sp.layers[j] = sp.layers[j], sp.layers[i]
+            if sp.active_layer == i:
+                sp.active_layer = j
+            elif sp.active_layer == j:
+                sp.active_layer = i
+            render.flatten_sprite(sp)
+            self._thumbs_dirty = True
+
+    def layer_toggle(self, i):
+        sp = self.paint_target()
+        if sp and 0 <= i < len(sp.layers):
+            self.snapshot()
+            sp.layers[i].visible = not sp.layers[i].visible
+            render.flatten_sprite(sp)
+            self._thumbs_dirty = True
+
+    def layer_select(self, i):
+        sp = self.paint_target()
+        if sp and 0 <= i < len(sp.layers):
+            sp.active_layer = i
+            self.paint_undo.clear()
+            self.paint_redo.clear()
+
+    def rename_active_layer(self):
+        sp = self.paint_target()
+        if sp and sp.layers:
+            self.editing = ("rename_layer", sp.active_layer)
+            self.edit_buf = sp.layers[sp.active_layer].name
+
+    # -- dibujos del taller (independientes de los materiales) ------------
+    def _unique_drawing_name(self, base):
+        names = {d.name for d in self.project.drawings}
+        return self.project._unique(base, names)
+
+    def new_drawing(self):
+        self.snapshot()
+        w, h = self.project.tile_w, self.project.tile_h
+        d = model.Sprite(self._unique_drawing_name("dibujo"), None)
+        d.layers = [model.Layer("base", pygame.Surface((w, h), pygame.SRCALPHA))]
+        d.pivot = [w / 2.0, h / 2.0]
+        render.flatten_sprite(d)
+        self.project.drawings.append(d)
+        self.draw_idx = len(self.project.drawings) - 1
+        self.paint_undo.clear()
+        self.paint_redo.clear()
+        self._fit_canvas_view()
+        self._thumbs_dirty = True
+        self.status = "Dibujo nuevo. Pinta y luego 'Enviar como material'."
+
+    def draw_select(self, i):
+        if 0 <= i < len(self.project.drawings):
+            self.draw_idx = i
+            self.paint_undo.clear()
+            self.paint_redo.clear()
+            self._fit_canvas_view()
+
+    def delete_drawing(self, i):
+        if not (0 <= i < len(self.project.drawings)):
+            return
+        self.snapshot()
+        del self.project.drawings[i]
+        self.draw_idx = min(self.draw_idx, len(self.project.drawings) - 1)
+        self.paint_undo.clear()
+        self.paint_redo.clear()
+        self._thumbs_dirty = True
+
+    def rename_drawing(self):
+        d = self.paint_target()
+        if d is not None:
+            self.editing = ("rename_drawing", self.draw_idx)
+            self.edit_buf = d.name
+
+    def send_drawing_as_material(self):
+        """Envia el dibujo a Animacion creando UN MATERIAL POR CAPA (las partes
+        van por separado, como el paper-doll), copiadas y alineadas. El dibujo
+        del taller queda intacto y desacoplado de los materiales."""
+        d = self.paint_target()
+        if d is None or not d.layers:
+            self.status = "No hay dibujo que enviar."
+            return
+        tw, th = self.project.tile_w, self.project.tile_h
+        created = []
+        for lay in d.layers:
+            if not lay.visible or lay.surface is None:
+                continue
+            bb = lay.surface.get_bounding_rect(min_alpha=1)
+            if bb.width == 0 or bb.height == 0:
+                continue                              # capa vacia: se omite
+            cw, ch = lay.surface.get_size()
+            surf = lay.surface.copy()
+            if lay.opacity < 0.999:                   # hornear opacidad de capa
+                a = max(0, min(255, int(255 * lay.opacity)))
+                surf.fill((255, 255, 255, a), special_flags=pygame.BLEND_RGBA_MULT)
+            base = d.name if lay.name in ("base", "capa") else lay.name
+            sp = model.Sprite(self.project.unique_sprite_name(base), None)
+            sp.layers = [model.Layer("base", surf)]
+            render.flatten_sprite(sp)
+            # pivote = centro del lienzo (mismo para todas) -> partes alineadas
+            sp.pivot = [cw / 2.0, ch / 2.0]
+            sp.transform = {"x": self.project.box_x + tw / 2,
+                            "y": self.project.box_y + th / 2,
+                            "rot": 0.0, "scale": 1.0}
+            created.append(sp)
+        if not created:
+            self.status = "El dibujo no tiene capas con contenido para enviar."
+            return
+        self.snapshot()
+        for sp in created:
+            sp.z = len(self.project.sprites)
+            self.project.sprites.append(sp)
+        self.mode = "animate"
+        self.sel_kind, self.sel_idx = "sprite", len(self.project.sprites) - 1
+        self._thumbs_dirty = True
+        self.status = (f"{len(created)} parte(s) enviada(s) a Animacion (una por "
+                       "capa). Enlaza cada parte a su hueso con 'C'.")
+
+    def edit_material_in_paint(self, sprite_idx):
+        """Trae un material existente al taller como COPIA editable (sin
+        afectar al material hasta que se reenvie)."""
+        if not (0 <= sprite_idx < len(self.project.sprites)):
+            return
+        src = self.project.sprites[sprite_idx]
+        render.ensure_layers(src, (self.project.tile_w, self.project.tile_h))
+        self.snapshot()
+        d = model.Sprite(self._unique_drawing_name(src.name), src.image_path)
+        d.layers = [l.clone() for l in src.layers]
+        render.flatten_sprite(d)
+        self.project.drawings.append(d)
+        self.draw_idx = len(self.project.drawings) - 1
+        self.mode = "paint"
+        self.paint_undo.clear()
+        self.paint_redo.clear()
+        self._fit_canvas_view()
+        self._thumbs_dirty = True
+        self.status = f"Editando copia de '{src.name}' en el taller."
+
+    def paint_clear_pixels(self):
+        sp, layer = self._active_layer()
+        if layer is None:
+            return
+        self._paint_push_undo(sp, layer)
+        paint.clear_selection(layer.surface, self.paint.sel_mask)
+        self._after_paint(sp)
+
+    def flatten_to_base(self):
+        sp = self.paint_target()
+        if sp is None or sp.surface is None:
+            self.status = "No hay dibujo que guardar."
+            return
+        if not sp.image_path:
+            self.flatten_to_new()
+            return
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(sp.image_path)),
+                        exist_ok=True)
+            pygame.image.save(sp.surface, sp.image_path)
+            self.status = f"Imagen guardada en {os.path.basename(sp.image_path)}"
+        except Exception as e:
+            self.status = f"Error al guardar imagen: {e}"
+
+    def flatten_to_new(self):
+        sp = self.paint_target()
+        if sp is None or sp.surface is None:
+            self.status = "No hay dibujo que guardar."
+            return
+        path = dialogs.save_png_as()
+        if not path:
+            return
+        try:
+            pygame.image.save(sp.surface, path)
+            sp.image_path = path
+            self.status = f"Guardado como {os.path.basename(path)}"
+        except Exception as e:
+            self.status = f"Error al guardar imagen: {e}"
+
+    # -- interaccion de pintura ------------------------------------------
+    def _handle_paint_canvas(self):
+        c = self.r_canvas
+        over = c.collidepoint(self.mouse)
+        # terminar curva con clic derecho
+        if self.rmb_down and self.line_anchor and \
+                self.line_anchor.get("tool") == "curve":
+            self.commit_curve()
+            return
+        if self.wheel != 0 and over:
+            if pygame.key.get_mods() & pygame.KMOD_CTRL:
+                self.paint.brush = max(1, min(64,
+                                              self.paint.brush + (1 if self.wheel > 0 else -1)))
+            else:
+                old = self.s2pc(*self.mouse)
+                self.pzoom = max(1.0, min(40.0, self.pzoom * (1.1 ** self.wheel)))
+                new = self.s2pc(*self.mouse)
+                self.pcx += old[0] - new[0]
+                self.pcy += old[1] - new[1]
+        if self.pan:
+            if pygame.mouse.get_pressed()[1]:
+                s0, _, _, pcx0, pcy0 = self.pan
+                self.pcx = pcx0 - (self.mouse[0] - s0[0]) / self.pzoom
+                self.pcy = pcy0 - (self.mouse[1] - s0[1]) / self.pzoom
+            else:
+                self.pan = None
+        sp = self.paint_target()
+        if sp is None or sp.surface is None:
+            return
+        if self.lmb_down and over and self.active_scrub is None:
+            self._paint_press()
+        if self.drag is not None and self.drag.get("paint"):
+            if self.lmb_held:
+                self._paint_drag()
+            else:
+                self._paint_release()
+
+    def _paint_press(self):
+        sp, layer = self._active_layer()
+        if layer is None:
+            return
+        px, py = self._canvas_pixel()
+        t = self.ptool
+        if t == "hand":
+            self.drag = {"paint": True, "mode": "pan",
+                         "sx": self.mouse, "pcx": self.pcx, "pcy": self.pcy}
+            return
+        if t == "move":
+            # mover toda la capa, o solo lo seleccionado si hay seleccion
+            self._paint_push_undo(sp, layer)
+            W, H = layer.surface.get_size()
+            flo = pygame.Surface((W, H), pygame.SRCALPHA)
+            surf = layer.surface
+            if self.paint.sel_mask is not None:
+                m = self.paint.sel_mask
+                surf.lock()
+                for yy in range(H):
+                    for xx in range(W):
+                        if m.get_at((xx, yy)):
+                            flo.set_at((xx, yy), surf.get_at((xx, yy)))
+                            surf.set_at((xx, yy), (0, 0, 0, 0))
+                surf.unlock()
+            else:
+                flo.blit(surf, (0, 0))
+                surf.fill((0, 0, 0, 0))
+            self._after_paint(sp)
+            self.drag = {"paint": True, "mode": "sel_move", "float": flo,
+                         "start": (px, py)}
+            return
+        if t == "select":
+            W, H = layer.surface.get_size()
+            mods = pygame.key.get_mods()
+            add = bool(mods & pygame.KMOD_SHIFT)
+            sub = bool(mods & pygame.KMOD_CTRL)
+            inside = (self.paint.sel_mask is not None and 0 <= px < W
+                      and 0 <= py < H and self.paint.sel_mask.get_at((px, py)))
+            if inside and not add and not sub:
+                # mover el contenido seleccionado (corta a un buffer flotante)
+                self._paint_push_undo(sp, layer)
+                flo = pygame.Surface((W, H), pygame.SRCALPHA)
+                m, surf = self.paint.sel_mask, layer.surface
+                surf.lock()
+                for yy in range(H):
+                    for xx in range(W):
+                        if m.get_at((xx, yy)):
+                            flo.set_at((xx, yy), surf.get_at((xx, yy)))
+                            surf.set_at((xx, yy), (0, 0, 0, 0))
+                surf.unlock()
+                self._after_paint(sp)
+                self.drag = {"paint": True, "mode": "sel_move", "float": flo,
+                             "start": (px, py)}
+            else:
+                self.drag = {"paint": True, "mode": "sel_rect", "p0": (px, py),
+                             "op": "add" if add else ("sub" if sub else "replace")}
+            return
+        if t == "eyedropper":
+            col = paint.pick(layer.surface, px, py, sp.surface)
+            if col:
+                self._pick_color(col)
+            self.drag = {"paint": True, "mode": "none"}
+            return
+        if t == "bucket":
+            self._paint_push_undo(sp, layer)
+            paint.bucket(layer.surface, px, py, self.paint.color,
+                         self.paint.sel_mask, self.paint.tolerance)
+            self._after_paint(sp)
+            self.drag = {"paint": True, "mode": "none"}
+            return
+        if t == "wand":
+            self.paint.sel_mask = paint.magic_select(sp.surface, px, py,
+                                                     self.paint.tolerance)
+            self.drag = {"paint": True, "mode": "none"}
+            return
+        if t == "line":
+            self.line_anchor = {"tool": "line", "p0": (px, py), "p1": (px, py)}
+            self.drag = {"paint": True, "mode": "shape"}
+            return
+        if t == "curve":
+            # B-spline multi-punto: cada clic agrega un nodo; clic derecho o
+            # Enter cierra la curva; Esc la cancela.
+            a = self.line_anchor
+            if a and a.get("tool") == "curve":
+                a["pts"].append((px, py))
+            else:
+                self.line_anchor = {"tool": "curve", "pts": [(px, py)]}
+            self.drag = {"paint": True, "mode": "none"}
+            return
+        # lapiz / borrador / sombreador: trazo continuo
+        self._paint_push_undo(sp, layer)
+        self._stamp_at(layer, px, py)
+        self.drag = {"paint": True, "mode": "stroke", "last": (px, py)}
+
+    def _stamp_at(self, layer, px, py):
+        t = self.ptool
+        if t == "eraser":
+            paint.stamp(layer.surface, px, py, (0, 0, 0, 0),
+                        self.paint.brush, self.paint.sel_mask)
+        elif t == "shade":
+            paint.shade(layer.surface, px, py, self.paint.brush,
+                        self.paint.shade_amount, self.paint.shade_lighten,
+                        self.paint.sel_mask)
+        else:
+            paint.stamp(layer.surface, px, py, self.paint.color,
+                        self.paint.brush, self.paint.sel_mask)
+
+    def _stroke_to(self, layer, x0, y0, x1, y1):
+        t = self.ptool
+        if t == "eraser":
+            paint.line(layer.surface, x0, y0, x1, y1, (0, 0, 0, 0),
+                       self.paint.brush, self.paint.sel_mask)
+        elif t == "shade":
+            paint.shade_line(layer.surface, x0, y0, x1, y1, self.paint.brush,
+                             self.paint.shade_amount, self.paint.shade_lighten,
+                             self.paint.sel_mask)
+        else:
+            paint.line(layer.surface, x0, y0, x1, y1, self.paint.color,
+                       self.paint.brush, self.paint.sel_mask)
+
+    def _paint_drag(self):
+        m = self.drag["mode"]
+        if m == "pan":
+            s0 = self.drag["sx"]
+            self.pcx = self.drag["pcx"] - (self.mouse[0] - s0[0]) / self.pzoom
+            self.pcy = self.drag["pcy"] - (self.mouse[1] - s0[1]) / self.pzoom
+        elif m == "stroke":
+            sp, layer = self._active_layer()
+            if layer is None:
+                return
+            px, py = self._canvas_pixel()
+            lx, ly = self.drag["last"]
+            self._stroke_to(layer, lx, ly, px, py)
+            self.drag["last"] = (px, py)
+            self._after_paint(sp)
+        elif m == "shape":
+            self._shape_drag()
+
+    def _paint_release(self):
+        m = self.drag.get("mode")
+        if m == "shape":
+            self._shape_release()
+        elif m == "sel_rect":
+            self._commit_sel_rect()
+        elif m == "sel_move":
+            self._commit_sel_move()
+        self.drag = None
+
+    def _rect_mask(self, x0, y0, x1, y1, w, h):
+        m = pygame.mask.Mask((w, h))
+        rx0, rx1 = sorted((x0, x1))
+        ry0, ry1 = sorted((y0, y1))
+        for yy in range(max(0, ry0), min(h, ry1 + 1)):
+            for xx in range(max(0, rx0), min(w, rx1 + 1)):
+                m.set_at((xx, yy), 1)
+        return m
+
+    def _commit_sel_rect(self):
+        sp, layer = self._active_layer()
+        if layer is None:
+            return
+        W, H = layer.surface.get_size()
+        p0, p1 = self.drag["p0"], self._canvas_pixel()
+        op = self.drag["op"]
+        tiny = abs(p1[0] - p0[0]) < 1 and abs(p1[1] - p0[1]) < 1
+        cur = self.paint.sel_mask
+        if op == "replace" and tiny:
+            self.paint.sel_mask = None        # clic simple => deseleccionar
+            return
+        if op == "sub" and cur is None:
+            return
+        rm = self._rect_mask(p0[0], p0[1], p1[0], p1[1], W, H)
+        if op == "add" and cur is not None:
+            cur.draw(rm, (0, 0))
+            self.paint.sel_mask = cur
+        elif op == "sub" and cur is not None:
+            cur.erase(rm, (0, 0))
+            self.paint.sel_mask = cur if cur.count() else None
+        else:
+            self.paint.sel_mask = rm
+
+    def _commit_sel_move(self):
+        sp, layer = self._active_layer()
+        if layer is None:
+            return
+        flo = self.drag["float"]
+        sx, sy = self.drag["start"]
+        px, py = self._canvas_pixel()
+        dx, dy = px - sx, py - sy
+        layer.surface.blit(flo, (dx, dy))
+        if (dx or dy) and self.paint.sel_mask is not None:
+            W, H = layer.surface.get_size()
+            nm = pygame.mask.Mask((W, H))
+            nm.draw(self.paint.sel_mask, (dx, dy))
+            self.paint.sel_mask = nm
+        self._after_paint(sp)
+
+    # linea: arrastra y suelta.
+    def _shape_drag(self):
+        a = self.line_anchor
+        if a and a["tool"] == "line":
+            a["p1"] = self._canvas_pixel()
+
+    def _shape_release(self):
+        a = self.line_anchor
+        if a and a["tool"] == "line":
+            sp, layer = self._active_layer()
+            if layer is not None and a["p0"] != a["p1"]:
+                self._paint_push_undo(sp, layer)
+                paint.line(layer.surface, a["p0"][0], a["p0"][1],
+                           a["p1"][0], a["p1"][1], self.paint.color,
+                           self.paint.brush, self.paint.sel_mask)
+                self._after_paint(sp)
+            self.line_anchor = None
+
+    def commit_curve(self):
+        a = self.line_anchor
+        if not a or a.get("tool") != "curve":
+            return
+        if len(a["pts"]) >= 2:
+            sp, layer = self._active_layer()
+            if layer is not None:
+                self._paint_push_undo(sp, layer)
+                paint.spline(layer.surface, a["pts"], self.paint.color,
+                             self.paint.brush, self.paint.sel_mask)
+                self._after_paint(sp)
+        self.line_anchor = None
+
+    # ====================================================================
+    # interaccion del canvas (modo Animar)
     # ====================================================================
     def _handle_canvas(self):
+        if self.mode == "paint":
+            self._handle_paint_canvas()
+            return
         c = self.r_canvas
         over = c.collidepoint(self.mouse)
 
         if self.pan:
             if pygame.mouse.get_pressed()[1]:
-                sp, cx, cy = self.pan
+                sp, cx, cy, _, _ = self.pan
                 self.cam_x = cx - (self.mouse[0] - sp[0]) / self.zoom
                 self.cam_y = cy - (self.mouse[1] - sp[1]) / self.zoom
             else:
@@ -779,6 +1603,13 @@ class App:
                 self._canvas_release()
 
     def _canvas_press(self):
+        if self.tool == "hand":
+            self.drag = {"mode": "pan_canvas", "sx": self.mouse,
+                         "cx": self.cam_x, "cy": self.cam_y}
+            return
+        if self.tool == "link":
+            self._link_press()
+            return
         if self.tool == "bone":
             head = self.s2w(*self.mouse)
             parent = self._nearest_tip(*self.mouse)
@@ -828,9 +1659,14 @@ class App:
             self.sel_kind, self.sel_idx = None, -1
 
     def _canvas_drag(self):
+        m = self.drag["mode"]
+        if m == "pan_canvas":
+            s0 = self.drag["sx"]
+            self.cam_x = self.drag["cx"] - (self.mouse[0] - s0[0]) / self.zoom
+            self.cam_y = self.drag["cy"] - (self.mouse[1] - s0[1]) / self.zoom
+            return
         mwx, mwy = self.s2w(*self.mouse)
         pwx, pwy = self.s2w(*self.prev_mouse)
-        m = self.drag["mode"]
 
         if m == "sprite_rotate":
             sp = self.project.sprites[self.drag["idx"]]
@@ -950,12 +1786,16 @@ class App:
     # ====================================================================
     def _draw(self):
         self.screen.fill(BG)
-        self._draw_canvas()
+        if self.mode == "paint":
+            self._draw_paint_canvas()
+        else:
+            self._draw_canvas()
         self._draw_toolbar()
         self._draw_topbar()
         self._draw_left()
         self._draw_right()
         self._draw_timeline()
+        self._draw_splitters()
         if self.recovery_data:
             self._draw_recovery_banner()
         if self.show_help:
@@ -981,6 +1821,8 @@ class App:
             self._draw_bones()
         if not self.playing:
             self._draw_sprite_gizmo()
+        if self.tool == "link" and not self.playing:
+            self._draw_link_gesture()
         if self.drag and self.drag["mode"] == "bone_create":
             h = self.w2s(*self.drag["head"])
             pygame.draw.line(self.screen, BONE_SEL, h, self.mouse, 2)
@@ -988,7 +1830,8 @@ class App:
                                (int(h[0]), int(h[1])), 5, 1)
         self.screen.set_clip(None)
 
-        tool_lbl = "SELECCION (V)" if self.tool == "select" else "HUESO (B)"
+        tool_lbl = {"select": "SELECCION (V)", "bone": "HUESO (B)",
+                    "link": "ENLACE (C)", "hand": "MANO (H)"}.get(self.tool, self.tool)
         self.text(tool_lbl, (c.x + 56, c.y + 8), ACCENT, font=self.font_b)
         fr = ("Reposo" if self.cur_frame < 0
               else f"Frame {self.cur_frame+1}/{len(self.project.frames)}")
@@ -1008,19 +1851,63 @@ class App:
             y += step
 
     def _draw_links(self):
-        """Linea fina entre cada sprite vinculado y la cabeza de su hueso."""
+        """Linea sutil SOLO del sprite seleccionado a su hueso (sin saturar)."""
+        sp = self.selected_sprite()
+        if sp is None or not sp.bone or sp.surface is None:
+            return
+        bidx = self.project.bone_by_name(sp.bone)
+        if bidx < 0:
+            return
         pose = self.pose_for()
-        for sp in self.project.sprites:
-            if not sp.bone or sp.surface is None:
-                continue
-            bidx = self.project.bone_by_name(sp.bone)
-            if bidx < 0:
-                continue
-            sw = model.sprite_world(self.project, sp, pose)
-            bw = model.bone_world(self.project, bidx, pose)
-            a = self.w2s(sw[0], sw[1])
-            b = self.w2s(bw[0], bw[1])
-            pygame.draw.line(self.screen, (90, 110, 90), a, b, 1)
+        sw = model.sprite_world(self.project, sp, pose)
+        bw = model.bone_world(self.project, bidx, pose)
+        pygame.draw.line(self.screen, (110, 140, 110),
+                         self.w2s(sw[0], sw[1]), self.w2s(bw[0], bw[1]), 1)
+
+    def _draw_chain(self, a, b):
+        """Cadena/hilo animado entre dos puntos de pantalla (guia temporal)."""
+        ax, ay = a
+        bx, by = b
+        dx, dy = bx - ax, by - ay
+        dist = math.hypot(dx, dy)
+        if dist < 1:
+            pygame.draw.circle(self.screen, ACCENT, (int(ax), int(ay)), 4, 1)
+            return
+        ux, uy = dx / dist, dy / dist
+        pygame.draw.line(self.screen, (90, 80, 50), a, b, 1)
+        step = 9
+        d = (pygame.time.get_ticks() / 60.0) % step      # marcha animada
+        i = 0
+        while d < dist:
+            x, y = ax + ux * d, ay + uy * d
+            col = ACCENT if i % 2 == 0 else SELECT
+            pygame.draw.circle(self.screen, col, (int(x), int(y)), 3, 2)
+            d += step
+            i += 1
+        pygame.draw.circle(self.screen, ACCENT, (int(ax), int(ay)), 4)
+        pygame.draw.circle(self.screen, SELECT, (int(bx), int(by)), 4, 1)
+
+    def _draw_link_gesture(self):
+        if self.link_bone is None or self.link_bone >= len(self.project.bones):
+            return
+        head, _ = self._bone_endpoints_screen(self.link_bone, self.pose_for())
+        self._draw_chain(head, self.mouse)
+        hs = self._hit_sprite(*self.mouse)      # resaltar imagen objetivo
+        if hs >= 0:
+            self._highlight_sprite(hs)
+
+    def _highlight_sprite(self, idx):
+        sp = self.project.sprites[idx]
+        if sp.surface is None or not sp.content_rect:
+            return
+        wt = model.sprite_world(self.project, sp, self.pose_for())
+        cx, cy, cw, ch = sp.content_rect
+        pts = []
+        for ix, iy in ((cx, cy), (cx + cw, cy), (cx + cw, cy + ch), (cx, cy + ch)):
+            ox, oy = model._rot((ix - sp.pivot[0]) * wt[3],
+                                (iy - sp.pivot[1]) * wt[3], wt[2])
+            pts.append(self.w2s(wt[0] + ox, wt[1] + oy))
+        pygame.draw.polygon(self.screen, (130, 220, 150), pts, 2)
 
     def _draw_sprite_gizmo(self):
         sp = self.selected_sprite()
@@ -1069,15 +1956,171 @@ class App:
         pygame.draw.circle(self.screen, (20, 20, 24), (int(hx), int(hy)), 2)
         pygame.draw.circle(self.screen, col, (int(tx), int(ty)), 3)
 
+    PAINT_TOOLS = [("pencil", "P"), ("eraser", "E"), ("shade", "C"),
+                   ("bucket", "B"), ("eyedropper", "O"), ("move", "M"),
+                   ("select", "S"), ("wand", "W"), ("line", "L"),
+                   ("curve", "J"), ("hand", "H")]
+
     def _draw_toolbar(self):
         c = self.r_canvas
-        bar = pygame.Rect(c.x + 6, c.y + 30, 40, 88)
+        if self.mode == "paint":
+            tools = self.PAINT_TOOLS
+            bar = pygame.Rect(c.x + 6, c.y + 30, 40, 8 + len(tools) * 38)
+            pygame.draw.rect(self.screen, PANEL, bar, border_radius=6)
+            pygame.draw.rect(self.screen, LINE, bar, 1, border_radius=6)
+            for i, (t, letter) in enumerate(tools):
+                r = pygame.Rect(bar.x + 4, bar.y + 4 + i * 38, 32, 32)
+                self._paint_tool_btn(r, t, letter)
+            return
+        tools = ["select", "bone", "link", "hand"]
+        bar = pygame.Rect(c.x + 6, c.y + 30, 40, 8 + len(tools) * 40)
         pygame.draw.rect(self.screen, PANEL, bar, border_radius=6)
         pygame.draw.rect(self.screen, LINE, bar, 1, border_radius=6)
-        b1 = pygame.Rect(bar.x + 4, bar.y + 4, 32, 32)
-        b2 = pygame.Rect(bar.x + 4, bar.y + 44, 32, 32)
-        self._tool_btn(b1, "select")
-        self._tool_btn(b2, "bone")
+        for i, t in enumerate(tools):
+            self._tool_btn(pygame.Rect(bar.x + 4, bar.y + 4 + i * 40, 32, 32), t)
+
+    def _paint_tool_btn(self, rect, tool, letter):
+        active = self.ptool == tool
+        hot = rect.collidepoint(self.mouse)
+        col = ACTIVE if active else (HOVER if hot else PANEL2)
+        pygame.draw.rect(self.screen, col, rect, border_radius=4)
+        pygame.draw.rect(self.screen, LINE, rect, 1, border_radius=4)
+        self._draw_icon(tool, rect, TEXT)
+        # etiqueta de tecla, chiquita en la esquina
+        self.text(letter, (rect.right - 7, rect.bottom - 9), DIM, font=self.font_s,
+                  center=True)
+        if self.lmb_down and hot:
+            self.ptool = tool
+            self.line_anchor = None
+
+    def _icon_button(self, rect, name, label="", active=False, enabled=True):
+        hot = rect.collidepoint(self.mouse) and enabled
+        col = ACTIVE if active else (HOVER if hot else PANEL2)
+        pygame.draw.rect(self.screen, col, rect, border_radius=4)
+        pygame.draw.rect(self.screen, LINE, rect, 1, border_radius=4)
+        ico = pygame.Rect(rect.x, rect.y, rect.h, rect.h)
+        self._draw_icon(name, ico, TEXT if enabled else DIM)
+        if label:
+            self.text(label, (rect.x + rect.h + 2, rect.centery - 7),
+                      TEXT if enabled else DIM, font=self.font_s)
+        return enabled and self.lmb_down and hot
+
+    def _draw_icon(self, name, rect, col):
+        """Dibuja un icono vectorial centrado en rect (diseno sobre rejilla 32)."""
+        cx, cy = rect.center
+        u = min(rect.w, rect.h) / 32.0
+
+        def P(dx, dy):
+            return (cx + dx * u, cy + dy * u)
+
+        def line(a, b, w=2):
+            pygame.draw.line(self.screen, col, P(*a), P(*b), max(1, int(w * u + 0.5)))
+
+        def poly(pts, width=0):
+            pygame.draw.polygon(self.screen, col, [P(*p) for p in pts], width)
+
+        def circ(c, r, w=0):
+            pygame.draw.circle(self.screen, col, (int(P(*c)[0]), int(P(*c)[1])),
+                               max(1, int(r * u)), w)
+
+        if name == "pencil":
+            poly([(-9, 9), (-4, 9), (8, -3), (3, -8), (-9, -4)], 1)
+            line((-9, 9), (-9, -4)); line((-9, 9), (-4, 9))
+            line((3, -8), (8, -3)); line((-6, 6), (6, -6), 1)
+        elif name == "eraser":
+            poly([(-9, 5), (1, -5), (9, 3), (-1, 13)], 1)
+            line((-9, 5), (-9, 9)); line((-1, 13), (9, 9)); line((9, 3), (9, 9))
+            line((-1, 1), (5, 7), 1)
+        elif name == "shade":
+            circ((0, 0), 10, 1)
+            poly([(0, -10), (7, -7), (10, 0), (7, 7), (0, 10)])  # mitad sombreada
+        elif name == "bucket":
+            poly([(-8, -2), (2, -10), (9, -1), (-1, 7)], 1)
+            line((2, -10), (5, -13)); circ((5, -13), 2, 1)
+            poly([(9, 0), (12, 6), (6, 6)])               # gota
+        elif name == "eyedropper":
+            line((-8, 9), (4, -3), 2); circ((6, -6), 3, 1)
+            line((4, -3), (9, -8), 3); poly([(-8, 9), (-10, 11), (-6, 7)])
+        elif name == "wand":
+            line((-8, 9), (6, -5), 2)
+            for sx, sy in ((7, -9), (10, -4), (4, -11)):
+                line((sx - 2, sy), (sx + 2, sy), 1); line((sx, sy - 2), (sx, sy + 2), 1)
+        elif name == "move":            # cruceta (4 flechas)
+            line((0, -8), (0, 8), 2)
+            line((-8, 0), (8, 0), 2)
+            poly([(0, -10), (4, -6), (-4, -6)])
+            poly([(0, 10), (4, 6), (-4, 6)])
+            poly([(-10, 0), (-6, -4), (-6, 4)])
+            poly([(10, 0), (6, -4), (6, 4)])
+        elif name == "select":          # marquesina (rectangulo punteado)
+            r = pygame.Rect(*P(-9, -7), 18 * u, 14 * u)
+            d = max(2, int(3 * u))
+            xx = r.left
+            while xx < r.right:
+                pygame.draw.line(self.screen, col, (xx, r.top),
+                                 (min(xx + d, r.right), r.top))
+                pygame.draw.line(self.screen, col, (xx, r.bottom),
+                                 (min(xx + d, r.right), r.bottom))
+                xx += d * 2
+            yy = r.top
+            while yy < r.bottom:
+                pygame.draw.line(self.screen, col, (r.left, yy),
+                                 (r.left, min(yy + d, r.bottom)))
+                pygame.draw.line(self.screen, col, (r.right, yy),
+                                 (r.right, min(yy + d, r.bottom)))
+                yy += d * 2
+        elif name == "line":
+            line((-9, 9), (9, -9), 2); circ((-9, 9), 2); circ((9, -9), 2)
+        elif name == "curve":
+            pts = [(-10, 8), (-4, -10), (4, 10), (10, -8)]
+            sp = paint.bspline_points(pts, 8)
+            if len(sp) >= 2:
+                pygame.draw.lines(self.screen, col, False,
+                                  [P(*p) for p in sp], max(1, int(2 * u + 0.5)))
+        elif name == "hand":
+            poly([(-7, 2), (-7, 8), (6, 10), (8, 0), (8, -6), (6, -6),
+                  (6, -2), (4, -10), (2, -10), (3, -2), (1, -11), (-1, -11),
+                  (0, -1), (-3, -8), (-5, -7), (-2, 2)], 1)
+        elif name in ("eye", "eye_off"):
+            poly([(-10, 0), (-4, -5), (4, -5), (10, 0), (4, 5), (-4, 5)], 1)
+            circ((0, 0), 3)
+            if name == "eye_off":
+                line((-10, -8), (10, 8), 1)
+        elif name == "layer_add":
+            pygame.draw.rect(self.screen, col,
+                             pygame.Rect(*P(-9, -10), 13 * u, 18 * u), 1)
+            line((4, -5), (4, 7), 2); line((-2, 1), (10, 1), 2)   # +
+        elif name == "duplicate":
+            pygame.draw.rect(self.screen, col,
+                             pygame.Rect(*P(-10, -8), 12 * u, 14 * u), 1)
+            pygame.draw.rect(self.screen, col,
+                             pygame.Rect(*P(-2, -2), 12 * u, 14 * u), 1)
+        elif name == "trash":
+            line((-7, -6), (7, -6), 2); line((-5, -6), (-4, 9), 1)
+            line((5, -6), (4, 9), 1); line((-4, 9), (4, 9), 1)
+            line((-3, -6), (-2, -9), 1); line((3, -6), (2, -9), 1)
+            line((-2, -9), (2, -9), 1)
+        elif name == "up":
+            poly([(0, -7), (7, 4), (-7, 4)], 1)
+        elif name == "down":
+            poly([(0, 7), (7, -4), (-7, -4)], 1)
+        elif name == "capture":
+            pygame.draw.rect(self.screen, col,
+                             pygame.Rect(*P(-11, -5), 22 * u, 14 * u), 1)
+            line((-6, -5), (-3, -8)); line((-3, -8), (3, -8)); line((3, -8), (6, -5))
+            circ((0, 2), 4, 1); circ((7, -2), 1)
+        elif name == "prev":
+            line((4, -7), (-4, 0), 2); line((-4, 0), (4, 7), 2)
+        elif name == "next":
+            line((-4, -7), (4, 0), 2); line((4, 0), (-4, 7), 2)
+        elif name == "play":
+            poly([(-5, -8), (8, 0), (-5, 8)])
+        elif name == "stop":
+            pygame.draw.rect(self.screen, col, pygame.Rect(*P(-6, -6), 12 * u, 12 * u))
+        elif name == "rest":
+            poly([(0, -9), (9, -1), (-9, -1)])               # techo
+            pygame.draw.rect(self.screen, col,
+                             pygame.Rect(*P(-6, -1), 12 * u, 9 * u), 1)
 
     def _tool_btn(self, rect, tool):
         active = self.tool == tool
@@ -1091,13 +2134,21 @@ class App:
                    (cx + 1, cy + 9), (cx + 4, cy + 7), (cx + 1, cy + 1),
                    (cx + 6, cy + 1)]
             pygame.draw.polygon(self.screen, TEXT, pts)
-        else:                  # hueso
+        elif tool == "bone":
             pygame.draw.line(self.screen, TEXT, (cx - 6, cy + 6),
                              (cx + 6, cy - 6), 3)
             for ex, ey in ((cx - 6, cy + 6), (cx + 6, cy - 6)):
                 pygame.draw.circle(self.screen, TEXT, (ex, ey), 3)
+        elif tool == "link":   # dos eslabones de cadena
+            pygame.draw.ellipse(self.screen, TEXT,
+                                pygame.Rect(cx - 9, cy - 2, 11, 8), 2)
+            pygame.draw.ellipse(self.screen, TEXT,
+                                pygame.Rect(cx - 2, cy - 6, 11, 8), 2)
+        else:                  # hand
+            self._draw_icon("hand", rect, TEXT)
         if self.lmb_down and hot:
             self.tool = tool
+            self.link_bone = None
 
     # -- topbar ----------------------------------------------------------
     def _draw_topbar(self):
@@ -1136,44 +2187,56 @@ class App:
                        enabled=self.history.can_redo()):
             self.redo()
         x += 66
+        mlabel = "Pintar (Tab)" if self.mode == "animate" else "Animar (Tab)"
+        if self.button(pygame.Rect(x, 5, 96, 26), mlabel,
+                       active=self.mode == "paint"):
+            self.toggle_mode()
+        x += 100
         if self.button(pygame.Rect(x, 5, 54, 26), "Ayuda", active=self.show_help):
             self.show_help = not self.show_help
 
     # -- panel izquierdo: imagenes + huesos ------------------------------
     def _draw_left(self):
+        if self.mode == "paint":
+            self._draw_left_paint()
+            return
         p = self.r_left
         pygame.draw.rect(self.screen, PANEL, p)
-        pygame.draw.line(self.screen, LINE, (p.right, p.y), (p.right, p.bottom))
-        half = p.y + (p.h // 2)
+        half = p.y + int(p.h * self.left_split)
+        pending_delete = None
 
+        # ---- IMAGENES (materiales) ----
         self.text("IMAGENES", (p.x + 10, p.y + 8), ACCENT, font=self.font_b)
         if self.button(pygame.Rect(p.x + 8, p.y + 28, p.w - 16, 24),
                        "+ Importar imagen"):
             self.import_images()
-        # el borrado se DIFIERE: no se puede mutar la lista mientras se dibuja
-        pending_delete = None
-        y = p.y + 58
+        itop = p.y + 56
+        irect = pygame.Rect(p.x, itop, p.w, max(20, half - itop - 4))
         order = sorted(range(len(self.project.sprites)),
                        key=lambda i: (self.project.sprites[i].z, i), reverse=True)
-        for idx in order:
-            if y > half - 26:
-                break
+        sc, rows, maxs = self._list_scroll("scroll_img", irect, len(order), 32)
+        y = itop
+        for idx in order[sc:sc + rows]:
             sp = self.project.sprites[idx]
             sel = (self.sel_kind == "sprite" and self.sel_idx == idx)
             y, dele = self._list_row(
                 p, y, sp.name, sel, sp.visible,
                 lambda i=idx: self._sel("sprite", i),
                 lambda i=idx: self._toggle_vis_sprite(i),
-                tag="B" if sp.bone else "")
+                tag="B" if sp.bone else "", thumb=sp.surface)
             if dele:
                 pending_delete = ("sprite", idx)
+        self._scrollbar(irect, sc, len(order), rows, maxs)
 
+        # ---- HUESOS ----
         pygame.draw.line(self.screen, LINE, (p.x + 6, half), (p.right - 6, half))
         self.text("HUESOS", (p.x + 10, half + 6), ACCENT, font=self.font_b)
-        y = half + 28
-        for idx in range(len(self.project.bones)):
-            if y > p.bottom - 26:
-                break
+        btop = half + 26
+        brect = pygame.Rect(p.x, btop, p.w, max(20, p.bottom - btop - 2))
+        nb = len(self.project.bones)
+        sc2, rows2, maxs2 = self._list_scroll("scroll_bone", brect, nb, 26)
+        y = btop
+        for idx in range(sc2, min(nb, sc2 + rows2)):
             b = self.project.bones[idx]
             sel = (self.sel_kind == "bone" and self.sel_idx == idx)
             depth = 0
@@ -1187,6 +2250,7 @@ class App:
                 indent=depth * 10)
             if dele:
                 pending_delete = ("bone", idx)
+        self._scrollbar(brect, sc2, nb, rows2, maxs2)
 
         if pending_delete is not None:
             kind, i = pending_delete
@@ -1196,13 +2260,20 @@ class App:
                 self.delete_bone(i)
 
     def _list_row(self, p, y, label, sel, visible, on_sel, on_eye,
-                  indent=0, tag=""):
+                  indent=0, tag="", thumb=None):
         """Dibuja una fila. Devuelve (nuevo_y, borrar_pedido). El borrado se
         difiere al que llama para no mutar la lista durante el dibujo."""
-        row = pygame.Rect(p.x + 8, y, p.w - 16, 24)
+        h = 30 if thumb is not None else 24
+        row = pygame.Rect(p.x + 8, y, p.w - 16, h)
         col = ACTIVE if sel else (HOVER if row.collidepoint(self.mouse) else PANEL2)
         pygame.draw.rect(self.screen, col, row, border_radius=3)
-        self.text(label, (row.x + 6 + indent, row.centery - 7),
+        tx = row.x + 6 + indent
+        if thumb is not None:
+            box = pygame.Rect(row.x + 3, row.y + 3, 24, 24)
+            pygame.draw.rect(self.screen, (26, 28, 34), box)
+            self._blit_thumb(thumb, box.inflate(-2, -2))
+            tx = box.right + 4
+        self.text(label, (tx, row.centery - 7),
                   TEXT if visible else DIM, font=self.font_s)
         if tag:
             self.text(tag, (row.right - 52, row.centery - 7), ACCENT,
@@ -1220,7 +2291,27 @@ class App:
                 and not xbtn.collidepoint(self.mouse)
                 and not (eye and eye.collidepoint(self.mouse))):
             on_sel()
-        return y + 26, delete_requested
+        return y + h + 2, delete_requested
+
+    def _list_scroll(self, attr, rect, count, row_h):
+        """Aplica la rueda a una lista cuando el mouse esta encima y devuelve
+        (scroll, filas_visibles, scroll_max)."""
+        rows = max(1, rect.h // row_h)
+        maxs = max(0, count - rows)
+        cur = getattr(self, attr)
+        if self.wheel and rect.collidepoint(self.mouse):
+            cur -= self.wheel
+        cur = max(0, min(maxs, cur))
+        setattr(self, attr, cur)
+        return cur, rows, maxs
+
+    def _scrollbar(self, rect, scroll, count, rows, maxs):
+        if maxs <= 0 or count <= 0:
+            return
+        bar_h = max(16, rect.h * rows // count)
+        bar_y = rect.y + (rect.h - bar_h) * scroll // maxs
+        pygame.draw.rect(self.screen, PANEL2, (rect.right - 5, bar_y, 3, bar_h),
+                         border_radius=2)
 
     def _sel(self, kind, idx):
         self.sel_kind, self.sel_idx = kind, idx
@@ -1230,8 +2321,423 @@ class App:
         self.project.sprites[idx].visible = not self.project.sprites[idx].visible
         self._thumbs_dirty = True
 
+    # ====================================================================
+    # dibujo del modo Pintar
+    # ====================================================================
+    def _pc_center(self, px, py):
+        return self.pc2s(px + 0.5, py + 0.5)
+
+    def _draw_paint_canvas(self):
+        c = self.r_canvas
+        pygame.draw.rect(self.screen, (30, 32, 38), c)
+        self.screen.set_clip(c)
+        sp = self.paint_target()
+        if sp is None or sp.surface is None:
+            self.screen.set_clip(None)
+            self.text("Taller vacio. Crea un 'Nuevo dibujo' (panel izquierdo).",
+                      c.center, DIM, font=self.font_s, center=True)
+            self.text("PINTAR", (c.x + 56, c.y + 8), ACCENT, font=self.font_b)
+            return
+        w, h = sp.size
+        x0, y0 = self.pc2s(0, 0)
+        x1, y1 = self.pc2s(w, h)
+        rect = pygame.Rect(int(x0), int(y0), max(1, int(x1 - x0)),
+                           max(1, int(y1 - y0)))
+        self._draw_checker(rect)
+        self.screen.blit(pygame.transform.scale(sp.surface, rect.size),
+                         rect.topleft)
+        pygame.draw.rect(self.screen, ACCENT, rect, 1)
+        if self.pzoom >= 6:
+            self._draw_pixel_grid(rect, w, h)
+        if self.paint.sel_mask is not None:
+            self._draw_selection_overlay(rect, w, h)
+        self._draw_shape_preview()
+        self._draw_sel_preview()
+        self._draw_brush_cursor()
+        self.screen.set_clip(None)
+
+        labels = {"pencil": "Lapiz", "eraser": "Borrador", "shade": "Sombreador",
+                  "bucket": "Bote", "eyedropper": "Cuentagotas", "wand": "Vara magica",
+                  "line": "Linea", "curve": "Curva", "hand": "Mano"}
+        self.text(f"PINTAR — {labels.get(self.ptool, self.ptool)}",
+                  (c.x + 56, c.y + 8), ACCENT, font=self.font_b)
+        self.text(f"{w}x{h}px  z{self.pzoom:.0f}", (c.right - 10, c.y + 8),
+                  TEXT, font=self.font_b, right=True)
+
+    def _draw_checker(self, rect):
+        a, b, cs = (60, 62, 70), (48, 50, 58), 8
+        self.screen.fill(b, rect)
+        for j, yy in enumerate(range(rect.y, rect.bottom, cs)):
+            for i, xx in enumerate(range(rect.x, rect.right, cs)):
+                if (i + j) % 2 == 0:
+                    self.screen.fill(a, pygame.Rect(
+                        xx, yy, min(cs, rect.right - xx), min(cs, rect.bottom - yy)))
+
+    def _draw_pixel_grid(self, rect, w, h):
+        col = (70, 73, 84)
+        for i in range(w + 1):
+            x = rect.x + i * rect.w / w
+            pygame.draw.line(self.screen, col, (x, rect.y), (x, rect.bottom))
+        for j in range(h + 1):
+            y = rect.y + j * rect.h / h
+            pygame.draw.line(self.screen, col, (rect.x, y), (rect.right, y))
+
+    def _draw_selection_overlay(self, rect, w, h):
+        mask = self.paint.sel_mask
+        # relleno translucido de los pixeles seleccionados
+        try:
+            fill = pygame.Surface((w, h), pygame.SRCALPHA)
+            mask.to_surface(fill, setcolor=(250, 245, 130, 70),
+                            unsetcolor=(0, 0, 0, 0))
+            self.screen.blit(pygame.transform.scale(fill, rect.size), rect.topleft)
+        except Exception:
+            pass
+        # contorno (hormigas) animado
+        try:
+            pts = mask.outline(every=2)
+        except Exception:
+            pts = []
+        if len(pts) >= 2:
+            sp = [(rect.x + px * rect.w / w, rect.y + py * rect.h / h)
+                  for px, py in pts]
+            dash = (pygame.time.get_ticks() // 120) % 2
+            col = (250, 245, 130) if dash else (40, 40, 40)
+            pygame.draw.lines(self.screen, col, True, sp, 1)
+
+    def _draw_shape_preview(self):
+        a = self.line_anchor
+        if not a:
+            return
+        col = self.paint.color[:3]
+        if a["tool"] == "line":
+            pygame.draw.line(self.screen, col, self._pc_center(*a["p0"]),
+                             self._pc_center(*a["p1"]), 1)
+            return
+        # curva B-spline: nodos fijados + el cursor como nodo tentativo
+        pts = list(a["pts"]) + [self._canvas_pixel()]
+        sp = paint.bspline_points(pts)
+        if len(sp) >= 2:
+            pygame.draw.lines(self.screen, col, False,
+                              [self._pc_center(*p) for p in sp], 1)
+        for i, (px, py) in enumerate(a["pts"]):
+            s = self._pc_center(px, py)
+            pygame.draw.circle(self.screen, SELECT, (int(s[0]), int(s[1])), 3)
+        self.text("clic: nodo | clic der/Enter: cerrar | Esc: cancelar",
+                  (self.r_canvas.centerx, self.r_canvas.bottom - 8), DIM,
+                  font=self.font_s, center=True)
+
+    def _draw_sel_preview(self):
+        d = self.drag
+        if not d or not d.get("paint"):
+            return
+        if d["mode"] == "sel_rect":
+            p0, p1 = d["p0"], self._canvas_pixel()
+            a = self.pc2s(min(p0[0], p1[0]), min(p0[1], p1[1]))
+            b = self.pc2s(max(p0[0], p1[0]) + 1, max(p0[1], p1[1]) + 1)
+            pygame.draw.rect(self.screen, SELECT,
+                             pygame.Rect(int(a[0]), int(a[1]),
+                                         int(b[0] - a[0]), int(b[1] - a[1])), 1)
+        elif d["mode"] == "sel_move":
+            sp = self.paint_target()
+            if sp is None:
+                return
+            w, h = sp.size
+            x0, y0 = self.pc2s(0, 0)
+            x1, y1 = self.pc2s(w, h)
+            rect = pygame.Rect(int(x0), int(y0), max(1, int(x1 - x0)),
+                               max(1, int(y1 - y0)))
+            sx, sy = d["start"]
+            px, py = self._canvas_pixel()
+            pos = self.pc2s(px - sx, py - sy)
+            self.screen.blit(pygame.transform.scale(d["float"], rect.size),
+                             (int(pos[0]), int(pos[1])))
+
+    def _draw_brush_cursor(self):
+        if (not self.r_canvas.collidepoint(self.mouse)
+                or self.ptool not in ("pencil", "eraser", "shade", "line", "curve")):
+            return
+        px, py = self._canvas_pixel()
+        r = self.paint.brush // 2
+        x0, y0 = self.pc2s(px - r, py - r)
+        size = self.pzoom * self.paint.brush
+        pygame.draw.rect(self.screen, (255, 255, 255),
+                         pygame.Rect(int(x0), int(y0), int(size), int(size)), 1)
+
+    def _blit_thumb(self, surface, rect):
+        if surface is None:
+            return
+        w, h = surface.get_size()
+        if not (w and h):
+            return
+        sc = min(rect.w / w, rect.h / h)
+        tw, th = max(1, int(w * sc)), max(1, int(h * sc))
+        img = pygame.transform.scale(surface, (tw, th))
+        self.screen.blit(img, (rect.x + (rect.w - tw) // 2,
+                               rect.y + (rect.h - th) // 2))
+
+    def _draw_left_paint(self):
+        p = self.r_left
+        pygame.draw.rect(self.screen, PANEL, p)
+        split = p.y + int(p.h * self.left_split)
+        # ---- DIBUJOS (taller) ----
+        self.text("DIBUJOS", (p.x + 10, p.y + 8), ACCENT, font=self.font_b)
+        if self.button(pygame.Rect(p.x + 8, p.y + 28, 78, 24), "+ Nuevo"):
+            self.new_drawing()
+        if self.button(pygame.Rect(p.x + 90, p.y + 28, p.w - 98, 24),
+                       "Enviar capas", active=self.paint_target() is not None):
+            self.send_drawing_as_material()
+        dtop = p.y + 56
+        drect = pygame.Rect(p.x, dtop, p.w, max(20, split - dtop - 4))
+        nd = len(self.project.drawings)
+        if nd == 0:
+            self.text("(taller vacio)", (p.x + 12, dtop + 4), DIM, font=self.font_s)
+        sc, rows, maxs = self._list_scroll("scroll_draw", drect, nd, 34)
+        y = dtop
+        pend_draw = None
+        for i in range(sc, min(nd, sc + rows)):
+            if self._drawing_row(p, y, i, self.project.drawings[i],
+                                 i == self.draw_idx):
+                pend_draw = i
+            y += 34
+        self._scrollbar(drect, sc, nd, rows, maxs)
+        if pend_draw is not None:
+            self.delete_drawing(pend_draw)
+
+        # ---- CAPAS (del dibujo activo) ----
+        pygame.draw.line(self.screen, LINE, (p.x + 6, split), (p.right - 6, split))
+        self.text("CAPAS", (p.x + 10, split + 6), ACCENT, font=self.font_b)
+        if self._icon_button(pygame.Rect(p.right - 70, split + 4, 28, 22),
+                             "layer_add"):
+            self.layer_add()
+        if self._icon_button(pygame.Rect(p.right - 38, split + 4, 28, 22),
+                             "duplicate"):
+            self.layer_duplicate()
+        sp = self.paint_target()
+        if sp is None or not sp.layers:
+            self.text("(sin dibujo)", (p.x + 12, split + 32), DIM, font=self.font_s)
+            return
+        act = sp.layers[sp.active_layer]
+        self.text("Opac.", (p.x + 10, split + 32), TEXT, font=self.font_s)
+        v, ch = self.scrub("lopac", pygame.Rect(p.x + 56, split + 28, p.w - 68, 22),
+                           act.opacity * 100, 0.6, "{:.0f}")
+        if ch:
+            act.opacity = max(0.0, min(1.0, v / 100.0))
+            render.flatten_sprite(sp)
+            self._thumbs_dirty = True
+        ltop = split + 56
+        lrect = pygame.Rect(p.x, ltop, p.w, max(20, p.bottom - ltop - 2))
+        nl = len(sp.layers)
+        sc2, rows2, maxs2 = self._list_scroll("scroll_layer", lrect, nl, 30)
+        order = list(range(nl - 1, -1, -1))     # tope (mayor indice) arriba
+        y = ltop
+        pending = None
+        for i in order[sc2:sc2 + rows2]:
+            if self._layer_row(p, y, i, sp.layers[i], i == sp.active_layer):
+                pending = i
+            y += 30
+        self._scrollbar(lrect, sc2, nl, rows2, maxs2)
+        if pending is not None and nl > 1:
+            self.layer_delete(pending)
+
+    def _drawing_row(self, p, y, i, d, sel):
+        row = pygame.Rect(p.x + 8, y, p.w - 16, 30)
+        col = ACTIVE if sel else (HOVER if row.collidepoint(self.mouse) else PANEL2)
+        pygame.draw.rect(self.screen, col, row, border_radius=3)
+        thumb = pygame.Rect(row.x + 3, row.y + 3, 24, 24)
+        pygame.draw.rect(self.screen, (26, 28, 34), thumb)
+        self._blit_thumb(d.surface, thumb.inflate(-2, -2))
+        editing = (self.editing and self.editing[0] == "rename_drawing"
+                   and self.editing[1] == i)
+        if editing:
+            caret = "|" if (pygame.time.get_ticks() // 400) % 2 else ""
+            self.text(self.edit_buf + caret, (row.x + 32, row.centery - 7),
+                      TEXT, font=self.font_s)
+        else:
+            self.text(d.name, (row.x + 32, row.centery - 7), TEXT, font=self.font_s)
+        ren = pygame.Rect(row.right - 44, row.y + 6, 18, 18)
+        dele = pygame.Rect(row.right - 22, row.y + 6, 18, 18)
+        consumed = False
+        if self._icon_button(ren, "pencil"):
+            self.draw_select(i); self.rename_drawing(); consumed = True
+        del_req = self._icon_button(dele, "trash")
+        if (self.lmb_down and row.collidepoint(self.mouse) and not consumed
+                and not del_req and not ren.collidepoint(self.mouse)
+                and not dele.collidepoint(self.mouse)):
+            self.draw_select(i)
+        return del_req
+
+    def _layer_row(self, p, y, i, lay, sel):
+        row = pygame.Rect(p.x + 8, y, p.w - 16, 28)
+        col = ACTIVE if sel else (HOVER if row.collidepoint(self.mouse) else PANEL2)
+        pygame.draw.rect(self.screen, col, row, border_radius=3)
+        # ojito para mostrar/ocultar
+        eye = pygame.Rect(row.x + 4, row.y + 5, 18, 18)
+        consumed = False
+        if self._icon_button(eye, "eye" if lay.visible else "eye_off"):
+            self.layer_toggle(i); consumed = True
+        editing = (self.editing and self.editing[0] == "rename_layer"
+                   and self.editing[1] == i)
+        if editing:
+            caret = "|" if (pygame.time.get_ticks() // 400) % 2 else ""
+            self.text(self.edit_buf + caret, (row.x + 28, row.centery - 7),
+                      TEXT, font=self.font_s)
+        else:
+            self.text(lay.name, (row.x + 28, row.centery - 7),
+                      TEXT if lay.visible else DIM, font=self.font_s)
+        dele = pygame.Rect(row.right - 24, row.y + 5, 18, 18)
+        up = pygame.Rect(row.right - 46, row.y + 5, 18, 18)
+        dn = pygame.Rect(row.right - 68, row.y + 5, 18, 18)
+        del_req = self._icon_button(dele, "trash")
+        if self._icon_button(up, "up"):
+            self.layer_move(i, 1); consumed = True
+        if self._icon_button(dn, "down"):
+            self.layer_move(i, -1); consumed = True
+        consumed = consumed or del_req
+        if (self.lmb_down and row.collidepoint(self.mouse) and not consumed
+                and not any(r.collidepoint(self.mouse)
+                            for r in (eye, dele, up, dn))):
+            self.layer_select(i)
+        return del_req
+
+    def _sv_surface(self, w, h):
+        key = (round(self.paint.hue, 3), w, h)
+        if self._sv_key == key and self._sv_surf is not None:
+            return self._sv_surf
+        import colorsys
+        surf = pygame.Surface((w, h))
+        for j in range(h):
+            v = 1.0 - j / (h - 1)
+            for i in range(w):
+                s = i / (w - 1)
+                r, g, b = colorsys.hsv_to_rgb(self.paint.hue, s, v)
+                surf.set_at((i, j), (int(r * 255), int(g * 255), int(b * 255)))
+        self._sv_key, self._sv_surf = key, surf
+        return surf
+
+    def _hue_surface(self, w, h):
+        if self._hue_surf is not None and self._hue_surf.get_size() == (w, h):
+            return self._hue_surf
+        import colorsys
+        surf = pygame.Surface((w, h))
+        for j in range(h):
+            r, g, b = colorsys.hsv_to_rgb(j / (h - 1), 1, 1)
+            pygame.draw.line(surf, (int(r * 255), int(g * 255), int(b * 255)),
+                             (0, j), (w, j))
+        self._hue_surf = surf
+        return surf
+
+    def _draw_right_paint(self):
+        p = self.r_right
+        pygame.draw.rect(self.screen, PANEL, p)
+        pygame.draw.line(self.screen, LINE, (p.x, p.y), (p.x, p.bottom))
+        x, w = p.x + 10, p.w - 20
+        self.text("COLOR", (x, p.y + 8), ACCENT, font=self.font_b)
+        y = p.y + 30
+        # --- picker HSV: cuadro Saturacion/Valor + barra de matiz ---------
+        hue_w = 18
+        sv = pygame.Rect(x, y, w - hue_w - 6, 92)
+        hue = pygame.Rect(sv.right + 6, y, hue_w, 92)
+        self.screen.blit(pygame.transform.scale(
+            self._sv_surface(72, 46), sv.size), sv.topleft)
+        self.screen.blit(pygame.transform.scale(
+            self._hue_surface(hue_w, 64), hue.size), hue.topleft)
+        pygame.draw.rect(self.screen, LINE, sv, 1)
+        pygame.draw.rect(self.screen, LINE, hue, 1)
+        # marcadores
+        mx = sv.x + self.paint.sat * sv.w
+        my = sv.y + (1 - self.paint.val) * sv.h
+        pygame.draw.circle(self.screen, (255, 255, 255), (int(mx), int(my)), 4, 1)
+        pygame.draw.circle(self.screen, (0, 0, 0), (int(mx), int(my)), 5, 1)
+        hy = hue.y + self.paint.hue * hue.h
+        pygame.draw.rect(self.screen, TEXT, (hue.x - 1, int(hy) - 1, hue.w + 2, 3), 1)
+        if self.lmb_held:
+            if sv.collidepoint(self.mouse):
+                self.paint.sat = max(0.0, min(1.0, (self.mouse[0] - sv.x) / sv.w))
+                self.paint.val = max(0.0, min(1.0, 1 - (self.mouse[1] - sv.y) / sv.h))
+                self._set_color_from_hsv()
+            elif hue.collidepoint(self.mouse):
+                self.paint.hue = max(0.0, min(0.999, (self.mouse[1] - hue.y) / hue.h))
+                self._set_color_from_hsv()
+        y += 100
+        # swatches activo/secundario + Alpha
+        sw = pygame.Rect(x, y, 30, 30)
+        pygame.draw.rect(self.screen, self.paint.color[:3], sw, border_radius=4)
+        pygame.draw.rect(self.screen, LINE, sw, 1, border_radius=4)
+        sw2 = pygame.Rect(x + 34, y + 8, 22, 22)
+        pygame.draw.rect(self.screen, self.paint.color2[:3], sw2, border_radius=3)
+        pygame.draw.rect(self.screen, LINE, sw2, 1, border_radius=3)
+        if self.lmb_down and sw2.collidepoint(self.mouse):
+            self.paint.color, self.paint.color2 = self.paint.color2, self.paint.color
+            self._sync_hsv_from_color()
+        self.text("Alpha", (x + 64, y - 1), DIM, font=self.font_s)
+        v, ch = self.scrub("colA", pygame.Rect(x + 64, y + 12, w - 64, 18),
+                           self.paint.color[3], 0.6, "{:.0f}")
+        if ch:
+            cc = list(self.paint.color)
+            cc[3] = max(0, min(255, int(round(v))))
+            self.paint.color = tuple(cc)
+        y += 38
+        self.text("PALETA", (x, y), ACCENT, font=self.font_s)
+        if self.button(pygame.Rect(p.right - 78, y - 2, 68, 18), "+ color"):
+            if tuple(self.paint.color) not in self.paint.palette:
+                self.paint.palette.append(tuple(self.paint.color))
+        y += 20
+        perrow = max(1, w // 19)
+        for idx, colr in enumerate(self.paint.palette):
+            r = pygame.Rect(x + (idx % perrow) * 19, y + (idx // perrow) * 19, 16, 16)
+            pygame.draw.rect(self.screen, colr[:3], r)
+            if tuple(colr) == tuple(self.paint.color):
+                pygame.draw.rect(self.screen, SELECT, r, 2)
+            else:
+                pygame.draw.rect(self.screen, LINE, r, 1)
+            if self.lmb_down and r.collidepoint(self.mouse):
+                self._pick_color(colr)
+        rows = (len(self.paint.palette) + perrow - 1) // perrow
+        y += rows * 19 + 8
+        self.text("Pincel", (x + 4, y + 4), TEXT, font=self.font_s)
+        v, ch = self.scrub("brush", pygame.Rect(x + 84, y, w - 84, 22),
+                           self.paint.brush, 0.2, "{:.0f}")
+        if ch:
+            self.paint.brush = max(1, min(64, int(round(v))))
+        self.text("Ctrl+rueda", (x + 4, y + 16), DIM, font=self.font_s)
+        y += 30
+        self.text("Toleranc.", (x + 4, y + 4), TEXT, font=self.font_s)
+        v, ch = self.scrub("tol", pygame.Rect(x + 84, y, w - 84, 22),
+                           self.paint.tolerance, 0.6, "{:.0f}")
+        if ch:
+            self.paint.tolerance = max(0, min(255, int(round(v))))
+        y += 28
+        self.text("Sombra", (x + 4, y + 4), TEXT, font=self.font_s)
+        if self.button(pygame.Rect(x + 84, y, w - 84, 22),
+                       "Brillo (aclarar)" if self.paint.shade_lighten
+                       else "Sombra (oscurecer)"):
+            self.paint.shade_lighten = not self.paint.shade_lighten
+        y += 26
+        self.text("Fuerza", (x + 4, y + 4), TEXT, font=self.font_s)
+        v, ch = self.scrub("shamt", pygame.Rect(x + 84, y, w - 84, 22),
+                           self.paint.shade_amount * 100, 0.5, "{:.0f}")
+        if ch:
+            self.paint.shade_amount = max(0.01, min(1.0, v / 100.0))
+        y += 30
+        pygame.draw.line(self.screen, LINE, (p.x + 6, y), (p.right - 6, y))
+        y += 8
+        self.text("GUARDAR IMAGEN", (x, y), ACCENT, font=self.font_s)
+        y += 20
+        if self.button(pygame.Rect(x, y, w, 24), "Aplanar -> asset base"):
+            self.flatten_to_base()
+        y += 28
+        if self.button(pygame.Rect(x, y, w, 24), "Aplanar -> PNG nuevo"):
+            self.flatten_to_new()
+        y += 28
+        if self.button(pygame.Rect(x, y, w, 24), "Quitar seleccion (Ctrl+D)",
+                       enabled=self.paint.sel_mask is not None):
+            self.paint.sel_mask = None
+
     # -- panel derecho: propiedades --------------------------------------
     def _draw_right(self):
+        if self.mode == "paint":
+            self._draw_right_paint()
+            return
         p = self.r_right
         pygame.draw.rect(self.screen, PANEL, p)
         pygame.draw.line(self.screen, LINE, (p.x, p.y), (p.x, p.bottom))
@@ -1352,7 +2858,10 @@ class App:
         if self.button(pygame.Rect(x, y, w, 22),
                        "Pivote al centro del contenido"):
             self.pivot_to_content(idx)
-        y += 32
+        y += 28
+        if self.button(pygame.Rect(x, y, w, 22), "Editar en Pintar (copia)"):
+            self.edit_material_in_paint(idx)
+        y += 30
         if self.button(pygame.Rect(x, y, w, 24), "Borrar imagen (Supr)"):
             self.delete_sprite(idx)
         return y + 32
@@ -1413,31 +2922,33 @@ class App:
         pygame.draw.rect(self.screen, PANEL, p)
         pygame.draw.line(self.screen, LINE, (0, p.y), (p.right, p.y))
         x, y = 8, p.y + 6
-        if self.button(pygame.Rect(x, y, 96, 24), "Capturar (K)"):
-            self.capture_frame()
-        x += 100
         canf = self.cur_frame >= 0
-        if self.button(pygame.Rect(x, y, 70, 24), "Duplicar", enabled=canf):
+        if self._icon_button(pygame.Rect(x, y, 54, 24), "capture", "K"):
+            self.capture_frame()
+        x += 58
+        if self._icon_button(pygame.Rect(x, y, 28, 24), "duplicate", enabled=canf):
             self.duplicate_frame(self.cur_frame)
-        x += 74
-        if self.button(pygame.Rect(x, y, 60, 24), "Borrar", enabled=canf):
+        x += 32
+        if self._icon_button(pygame.Rect(x, y, 28, 24), "trash",
+                             enabled=canf):
             self.delete_frame(self.cur_frame)
-        x += 64
-        if self.button(pygame.Rect(x, y, 28, 24), "<", enabled=canf):
+        x += 32
+        if self._icon_button(pygame.Rect(x, y, 26, 24), "prev", enabled=canf):
             self.move_frame(self.cur_frame, -1)
-        x += 30
-        if self.button(pygame.Rect(x, y, 28, 24), ">", enabled=canf):
+        x += 28
+        if self._icon_button(pygame.Rect(x, y, 26, 24), "next", enabled=canf):
             self.move_frame(self.cur_frame, +1)
-        x += 36
-        if self.button(pygame.Rect(x, y, 70, 24),
-                       "Detener" if self.playing else "Play", active=self.playing):
+        x += 32
+        if self._icon_button(pygame.Rect(x, y, 60, 24),
+                             "stop" if self.playing else "play", "Spc",
+                             active=self.playing):
             self.toggle_play()
-        x += 74
-        if self.button(pygame.Rect(x, y, 70, 24), "Reposo",
-                       active=self.cur_frame < 0):
+        x += 64
+        if self._icon_button(pygame.Rect(x, y, 40, 24), "rest",
+                             active=self.cur_frame < 0):
             self.cur_frame = -1
             self.sync_working()
-        x += 80
+        x += 48
         self.text(f"{len(self.project.frames)} frames  |  {self.status}",
                   (x, y + 5), DIM, font=self.font_s)
 
@@ -1487,19 +2998,33 @@ class App:
             "3) Herramienta HUESO (B): clic en el punto de inicio (nodo) y",
             "   arrastra hasta el extremo para crear el hueso (cilindro). Si",
             "   empiezas cerca de la PUNTA de otro hueso, se encadena (hijo).",
-            "4) IMPORTANTE: vincula cada imagen a un hueso para que lo siga.",
-            "   En PROPIEDADES usa 'Sigue al hueso < >' o el boton 'Vincular al",
-            "   hueso mas cercano'. Una linea verde confirma el vinculo.",
+            "4) ENLACE (C): la forma facil de vincular. Clic en un HUESO y luego",
+            "   clic en una IMAGEN; un hilo/cadena muestra la conexion. (Esc cancela)",
+            "   Tambien sirve 'Sigue al hueso < >' en PROPIEDADES. La linea del",
+            "   sprite seleccionado a su hueso confirma el vinculo.",
             "5) Mueve/rota huesos y pulsa Capturar (K) por frame. Exporta PNG.",
             "",
-            "K capturar   Espacio play   Supr borrar   F2 renombrar   Esc nada",
-            "Rueda zoom   Boton central paneo   Ctrl al rotar = pasos de 15",
+            "V seleccion  B hueso  C enlace  H mano (paneo)  K capturar  Espacio play",
+            "Supr borrar   F2 renombrar   Esc nada   Rueda zoom   Ctrl al rotar = 15",
             "Ctrl+S guardar  Ctrl+Shift+S guardar como  Ctrl+O abrir",
             "Ctrl+E exportar  Ctrl+Z deshacer  Ctrl+Y rehacer",
             "",
+            "MODO PINTAR (Tab): un TALLER aparte. Dibujas con CAPAS sin tocar la",
+            "animacion; al terminar pulsas 'Enviar -> material' y se copia a",
+            "Animacion como un sprite NUEVO (editar el dibujo ya no lo afecta).",
+            "P lapiz  E borrador  C sombra/brillo  B bote  O cuentagotas  M mover",
+            "L linea  J curva B-spline  S seleccion rectangular  W vara magica  H mano",
+            "Mover (M): arrastra para desplazar la capa (o lo seleccionado).",
+            "[ ] o Ctrl+rueda = tamano de pincel    X = cambia color activo/2do",
+            "Curva: clic agrega nodos; clic derecho o Enter cierra; Esc cancela.",
+            "Seleccion (S): arrastra un rectangulo (Shift suma, Ctrl resta); arrastra",
+            "   dentro para MOVER el contenido; clic simple deselecciona.",
+            "Vara magica selecciona la region de color; Ctrl+D deselecciona.",
+            "Para retocar un material existente: en sus Propiedades, 'Editar en Pintar'.",
+            "",
             "Recuadro NARANJA = area exportada (tile). Solo se exportan imagenes.",
             "",
-            "H / F1  cerrar ayuda",
+            "F1  cerrar ayuda   |   Tab  cambiar modo",
         ]
         y = 60
         for ln in lines:

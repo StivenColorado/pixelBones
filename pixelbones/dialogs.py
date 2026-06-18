@@ -45,8 +45,10 @@ def open_project():
 def save_project_as():
     if HOST is None:
         return None
+    cur = getattr(getattr(HOST, "project", None), "path", None)
+    name = os.path.basename(cur) if cur else "animacion.pbproj"
     return _run(title="Guardar proyecto como", mode="save",
-                exts=(".pbproj",), default_name="animacion.pbproj")
+                exts=(".pbproj",), default_name=name)
 
 
 def save_png_as():

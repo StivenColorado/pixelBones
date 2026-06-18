@@ -39,6 +39,9 @@ class FileBrowser:
         self.multi = multi
         self.exts = tuple(e.lower() for e in exts) if exts else None
         self.filename = default_name
+        # nombre "seleccionado": la primera tecla lo reemplaza (como en cualquier
+        # dialogo de guardar). Se apaga al editar o al elegir un archivo.
+        self._fresh = (mode == "save" and bool(default_name))
 
         start = start_dir or os.path.expanduser("~")
         if not os.path.isdir(start):
@@ -132,6 +135,7 @@ class FileBrowser:
         else:
             self.sel_names = {name}
         self.filename = name
+        self._fresh = False
         if dbl:
             self._confirm()
 
@@ -173,8 +177,14 @@ class FileBrowser:
             self._confirm()
         elif self.mode == "save":
             if e.key == pygame.K_BACKSPACE:
+                if self._fresh:
+                    self.filename = ""
+                self._fresh = False
                 self.filename = self.filename[:-1]
             elif e.unicode and e.unicode.isprintable():
+                if self._fresh:
+                    self.filename = ""
+                    self._fresh = False
                 if len(self.filename) < 60:
                     self.filename += e.unicode
 
@@ -269,9 +279,21 @@ class FileBrowser:
             fr = pygame.Rect(panel.x + 80, foot_y, panel.w - 96 - 180, 26)
             pygame.draw.rect(self.screen, (24, 26, 32), fr, border_radius=3)
             pygame.draw.rect(self.screen, ACCENT, fr, 1, border_radius=3)
-            caret = "|" if (pygame.time.get_ticks() // 400) % 2 else ""
-            self._text(self.filename + caret, (fr.x + 6, fr.centery - 7),
-                       TEXT, self.font_s)
+            if self._fresh:        # nombre "seleccionado": fondo resaltado
+                tw = self.font_s.size(self.filename)[0]
+                pygame.draw.rect(self.screen, (60, 80, 130),
+                                 (fr.x + 5, fr.y + 4, min(tw + 2, fr.w - 10), 18))
+                self._text(self.filename, (fr.x + 6, fr.centery - 7), TEXT,
+                           self.font_s)
+                self._text("(escribe para reemplazar)",
+                           (fr.right + 6, fr.centery - 7), DIM, self.font_s)
+            else:
+                caret = "|" if (pygame.time.get_ticks() // 400) % 2 else ""
+                self._text(self.filename + caret, (fr.x + 6, fr.centery - 7),
+                           TEXT, self.font_s)
+            if self.lmb_down and fr.collidepoint(self.mouse):
+                self.filename = ""      # clic en el campo: limpiar para escribir
+                self._fresh = False
         elif self.mode == "open" and self.multi:
             self._text(f"{len(self.sel_names)} seleccionada(s) — clic para "
                        f"marcar, doble clic para abrir", (panel.x + 16,

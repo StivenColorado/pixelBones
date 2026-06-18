@@ -23,6 +23,37 @@ rotación y línea de tiempo con los frames):
 A la izquierda, la animación reproduciéndose con **Play**; a la derecha, la
 hoja de tiles PNG que genera *Exportar hoja* (9 frames de 64×128).
 
+## Dos modos: Animar y Pintar (`Tab`)
+
+PixelBones es a la vez un **rig de huesos** y un **editor de pixel art**, así que
+no necesitas otra herramienta para dibujar las piezas.
+
+- **Animar** (por defecto): la escena con materiales, huesos, poses y timeline.
+- **Pintar**: un **taller** aparte. Dibujas en lienzos con **capas** estilo
+  Pixelorama, **sin** tocar la animación; al terminar pulsas **"Enviar →
+  material"** y el dibujo se **copia** a Animación como un sprite nuevo (seguir
+  editando el dibujo ya no afecta al material). Para retocar un material que ya
+  está en la escena, abre sus Propiedades y usa **"Editar en Pintar (copia)"**.
+  `Tab` alterna entre ambos modos.
+
+Herramientas de Pintar (teclas iguales a Pixelorama):
+
+| Tecla | Herramienta | | Tecla | Herramienta |
+|---|---|---|---|---|
+| `P` | Lápiz | | `O` | Cuentagotas |
+| `E` | Borrador | | `H` | Mano (paneo) |
+| `C` | Sombreador | | `L` | Línea |
+| `B` | Bote (relleno) | | `J` | Curva |
+| `W` | Vara mágica | | `[` `]` | Tamaño de pincel |
+
+`X` intercambia color activo/secundario. La **vara mágica** selecciona la región
+de color contigua y acota el pincel a ella (`Esc`/`Supr` la limpian/borran). El
+panel izquierdo muestra las **capas** (crear, ocultar, reordenar, borrar,
+renombrar con `F2`); el derecho, el **color/paleta/pincel** y los botones
+**"Aplanar → asset base"** / **"Aplanar → PNG nuevo"** para volcar la imagen al
+PNG que consume tu juego. Los píxeles se guardan dentro del `.pbproj`
+(comprimidos), así que las capas siguen editables al reabrir.
+
 ## Requisitos
 
 - Python 3.10+
