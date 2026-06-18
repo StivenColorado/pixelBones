@@ -1,10 +1,10 @@
 name: build
 
-# Compila ejecutables listos para descargar y abrir:
-#   - Windows: PixelBones-windows.exe   (doble clic)
-#   - Linux:   PixelBones-x86_64.AppImage (doble clic; portable)
+# Compila ejecutables listos para descargar y adjunta a la Release del tag vX.Y.Z:
+#   - Windows: PixelBones-windows.exe        (doble clic)
+#   - Linux:   PixelBones-x86_64.AppImage    (portable, doble clic)
+#              PixelBones-amd64.deb          (instalar: doble clic -> Software)
 #   - macOS:   PixelBones-macos
-# En cada push de un tag vX.Y.Z los adjunta a la Release de ese tag.
 on:
   push:
     tags: ['v*']
@@ -18,15 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            asset: PixelBones-windows.exe
-            src: dist/PixelBones.exe
-          - os: ubuntu-latest
-            asset: PixelBones-x86_64.AppImage
-          - os: macos-latest
-            asset: PixelBones-macos
-            src: dist/PixelBones
+        os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -36,46 +28,62 @@ jobs:
       - run: pip install pygame-ce pyinstaller pillow
       - run: pyinstaller --noconfirm --clean PixelBones.spec
 
-      # Windows / macOS: el binario tal cual
-      - name: Renombrar binario (Win/macOS)
-        if: matrix.os != 'ubuntu-latest'
+      - name: Empaquetar Windows
+        if: matrix.os == 'windows-latest'
         shell: bash
-        run: cp "${{ matrix.src }}" "${{ matrix.asset }}"
+        run: cp dist/PixelBones.exe PixelBones-windows.exe
 
-      # Linux: empaquetar como AppImage (doble clic, portable)
-      - name: Empaquetar AppImage (Linux)
+      - name: Empaquetar macOS
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: cp dist/PixelBones PixelBones-macos
+
+      - name: Empaquetar Linux (AppImage + .deb)
         if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: |
           set -e
+          # ---------- AppImage (portable) ----------
           APP=AppDir
           mkdir -p "$APP/usr/bin"
           cp dist/PixelBones "$APP/usr/bin/PixelBones"
           cp docs/icon.png "$APP/PixelBones.png"
-          cat > "$APP/PixelBones.desktop" <<'EOF'
-          [Desktop Entry]
-          Type=Application
-          Name=PixelBones
-          Exec=PixelBones
-          Icon=PixelBones
-          Categories=Graphics;
-          Terminal=false
-          EOF
-          cat > "$APP/AppRun" <<'EOF'
-          #!/bin/sh
-          HERE="$(dirname "$(readlink -f "$0")")"
-          exec "$HERE/usr/bin/PixelBones" "$@"
-          EOF
+          printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=PixelBones' \
+            'Exec=PixelBones' 'Icon=PixelBones' 'Categories=Graphics;' \
+            'Terminal=false' > "$APP/PixelBones.desktop"
+          printf '%s\n' '#!/bin/sh' \
+            'HERE="$(dirname "$(readlink -f "$0")")"' \
+            'exec "$HERE/usr/bin/PixelBones" "$@"' > "$APP/AppRun"
           chmod +x "$APP/AppRun" "$APP/usr/bin/PixelBones"
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$APP" "${{ matrix.asset }}"
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$APP" PixelBones-x86_64.AppImage
+
+          # ---------- .deb (instalacion nativa) ----------
+          VER="${GITHUB_REF_NAME#v}"; case "$VER" in [0-9]*) ;; *) VER="0.0.0";; esac
+          D=debroot
+          mkdir -p "$D/DEBIAN" "$D/usr/bin" "$D/usr/share/applications" \
+                   "$D/usr/share/icons/hicolor/256x256/apps"
+          cp dist/PixelBones "$D/usr/bin/pixelbones"; chmod +x "$D/usr/bin/pixelbones"
+          cp docs/icon.png "$D/usr/share/icons/hicolor/256x256/apps/pixelbones.png"
+          printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=PixelBones' \
+            'Comment=Editor de animacion esqueletica para pixel art' \
+            'Exec=/usr/bin/pixelbones' 'Icon=pixelbones' 'Categories=Graphics;' \
+            'Terminal=false' > "$D/usr/share/applications/pixelbones.desktop"
+          { echo "Package: pixelbones"; echo "Version: $VER"; \
+            echo "Section: graphics"; echo "Priority: optional"; \
+            echo "Architecture: amd64"; \
+            echo "Maintainer: StivenColorado <noreply@github.com>"; \
+            echo "Description: Editor de animacion esqueletica (cutout) para pixel art"; \
+          } > "$D/DEBIAN/control"
+          dpkg-deb --build --root-owner-group "$D" PixelBones-amd64.deb
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          name: ${{ matrix.os }}
+          path: PixelBones-*
       - name: Adjuntar a la Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset }}
+          files: PixelBones-*

@@ -20,7 +20,8 @@ no necesitas Python ni instalar dependencias:
 | Sistema | Archivo | Cómo abrir |
 |---|---|---|
 | Windows | `PixelBones-windows.exe` | doble clic |
-| Linux | `PixelBones-x86_64.AppImage` | doble clic (portable; si pide, marca "permitir ejecución" una vez) |
+| Linux (instalar) | `PixelBones-amd64.deb` | doble clic → *Software* → Instalar → queda en el menú de apps |
+| Linux (portable) | `PixelBones-x86_64.AppImage` | doble clic (marca "permitir ejecución" una vez) |
 | macOS | `PixelBones-macos` | doble clic |
 
 > Los binarios los compila automáticamente GitHub Actions en cada versión
