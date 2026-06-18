@@ -9,12 +9,25 @@ uniformes** (64×64, 64×128, lo que definas).
 No está atado a ningún juego: sirve para personas, animales o cualquier set
 de imágenes. WYSIWYG: el recuadro naranja es exactamente lo que se exporta.
 
+## Demo
+
+El editor con un proyecto real (esqueleto, sprites vinculados, máscara de
+rotación y línea de tiempo con los frames):
+
+![Editor de PixelBones](docs/editor.png)
+
+| Animación (reproducida) | Spritesheet exportado |
+|---|---|
+| ![Animación](docs/animation.gif) | ![Spritesheet](docs/spritesheet.png) |
+
+A la izquierda, la animación reproduciéndose con **Play**; a la derecha, la
+hoja de tiles PNG que genera *Exportar hoja* (9 frames de 64×128).
+
 ## Requisitos
 
 - Python 3.10+
-- `pygame-ce` (ver `requirements.txt`)
-- tkinter (incluido en la mayoría de instalaciones de Python; sólo se usa para
-  los diálogos de abrir/guardar archivos)
+- `pygame-ce` (ver `requirements.txt`) — única dependencia. El explorador de
+  archivos es propio (en pygame), no usa tkinter.
 
 ## Instalación y ejecución
 
