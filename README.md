@@ -1,3 +1,5 @@
+<img src="docs/icon.png" align="right" width="96" alt="PixelBones">
+
 # PixelBones
 
 Editor libre de **animación esquelética (cutout / huesos)** para pixel art.
@@ -8,6 +10,22 @@ uniformes** (64×64, 64×128, lo que definas).
 
 No está atado a ningún juego: sirve para personas, animales o cualquier set
 de imágenes. WYSIWYG: el recuadro naranja es exactamente lo que se exporta.
+
+## Descargar y ejecutar (sin instalar nada)
+
+Descarga el ejecutable de tu sistema desde la página de
+**[Releases](https://github.com/StivenColorado/pixelBones/releases)** y ábrelo —
+no necesitas Python ni instalar dependencias:
+
+| Sistema | Archivo |
+|---|---|
+| Windows | `PixelBones-windows.exe` (doble clic) |
+| Linux | `PixelBones-linux` (`chmod +x` y ejecutar) |
+| macOS | `PixelBones-macos` |
+
+> Los binarios los compila automáticamente GitHub Actions en cada versión
+> (Windows/Linux/macOS). Si prefieres correrlo desde el código, ve a
+> *Instalación y ejecución*.
 
 ## Demo
 
@@ -68,6 +86,21 @@ python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ./venv/bin/python main.py
 ```
+
+## Compilar el ejecutable (opcional)
+
+Para generar tu propio binario con el icono incluido:
+
+```bash
+./venv/bin/pip install pyinstaller pillow
+./venv/bin/python tools/make_icon.py     # regenera docs/icon.png + icon.ico
+./venv/bin/pyinstaller --noconfirm --clean PixelBones.spec
+# resultado en dist/  (PixelBones.exe en Windows, PixelBones en Linux/macOS)
+```
+
+Para publicar binarios de las 3 plataformas: crea un tag `vX.Y.Z` y haz push
+(`git tag v1.0.0 && git push --tags`); el workflow `.github/workflows/build.yml`
+los compila y los adjunta a la Release automáticamente.
 
 ## Modelo (estilo PixelOver)
 

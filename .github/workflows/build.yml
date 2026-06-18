@@ -1,0 +1,48 @@
+name: build
+
+# Compila ejecutables para Windows (.exe), Linux y macOS.
+# - En cada push de un tag vX.Y.Z los sube a la Release de ese tag.
+# - Tambien se puede lanzar a mano (workflow_dispatch) para descargar artifacts.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            out: dist/PixelBones.exe
+            asset: PixelBones-windows.exe
+          - os: ubuntu-latest
+            out: dist/PixelBones
+            asset: PixelBones-linux
+          - os: macos-latest
+            out: dist/PixelBones
+            asset: PixelBones-macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pygame-ce pyinstaller pillow
+      - run: pyinstaller --noconfirm --clean PixelBones.spec
+      - name: Renombrar binario
+        shell: bash
+        run: cp "${{ matrix.out }}" "${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+      - name: Adjuntar a la Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}

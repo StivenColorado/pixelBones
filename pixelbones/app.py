@@ -13,7 +13,7 @@ import math
 import os
 import pygame
 
-from . import model, render, dialogs, recovery, paint, config
+from . import model, render, dialogs, recovery, paint, config, appicon
 from .history import History
 
 # ---- tema -----------------------------------------------------------------
@@ -48,6 +48,10 @@ class App:
         except Exception:
             dw, dh = 1320, 840
         win = (min(1320, dw - 60), min(840, dh - 90))
+        try:
+            pygame.display.set_icon(appicon.make_icon(64))
+        except Exception:
+            pass
         self.screen = pygame.display.set_mode(win, pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("dejavusans,sans", 14)
