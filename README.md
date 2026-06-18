@@ -1,1 +1,109 @@
-# pixelBones
+# PixelBones
+
+Editor libre de **animación esquelética (cutout / huesos)** para pixel art.
+Importas las piezas de tu personaje (torso, cabeza, brazo, antebrazo, mano,
+muslo, pierna, pie…), las enlazas como huesos en jerarquía, las mueves/rotas,
+**capturas un frame**, repites, y exportas un **spritesheet PNG de tiles
+uniformes** (64×64, 64×128, lo que definas).
+
+No está atado a ningún juego: sirve para personas, animales o cualquier set
+de imágenes. WYSIWYG: el recuadro naranja es exactamente lo que se exporta.
+
+## Requisitos
+
+- Python 3.10+
+- `pygame-ce` (ver `requirements.txt`)
+- tkinter (incluido en la mayoría de instalaciones de Python; sólo se usa para
+  los diálogos de abrir/guardar archivos)
+
+## Instalación y ejecución
+
+```bash
+cd PixelBones
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+./venv/bin/python main.py
+```
+
+## Modelo (estilo PixelOver)
+
+Las **imágenes son sprites libres** (no son huesos). Los **huesos** se crean
+aparte como cilindros con nodos, y luego se **vinculan** los sprites a los
+huesos para animarlos. Hay dos herramientas (barra vertical en el lienzo):
+
+- 🖱 **Selección (`V`)**: clic en una imagen y arrastra para **moverla**.
+  También selecciona y **posa huesos**: arrastra el *cuerpo* del hueso para
+  rotarlo, o el *nodo de la cabeza* para moverlo.
+- 🦴 **Hueso (`B`)**: clic en el **punto de inicio (nodo)** y arrastra hasta el
+  extremo para crear el hueso. Si empiezas cerca de la **punta** de otro hueso,
+  el nuevo se **encadena** como hijo (jerarquía padre→hijo).
+
+## Flujo de trabajo
+
+1. **+ Importar imagen** (botón o arrastra PNG a la ventana). Entran como
+   sprites libres; muévelos con la herramienta Selección.
+2. Con la herramienta **Hueso (`B`)** dibuja el esqueleto (cilindros),
+   encadenando desde las puntas (ej. torso → brazo → antebrazo → mano).
+3. Selecciona cada imagen y en **Propiedades** elige su **Hueso** (`<` / `>`)
+   para vincularla; el sprite se queda donde está y desde ahí sigue al hueso.
+4. **Posa** los huesos (herramienta Selección) y pulsa **Capturar (`K`)** por
+   cada frame. 10 capturas = 10 tiles.
+5. **Play** para previsualizar a los FPS configurados.
+6. **Exporta**:
+   - *Exportar hoja*: una sola hoja compuesta (todos los sprites aplanados).
+   - *Exportar capas*: una hoja por sprite, todas alineadas.
+   - `cols` = 0 produce una tira horizontal; >0 produce una rejilla.
+
+## Jerarquía (cinemática directa / FK)
+
+Mover o rotar un hueso **padre** arrastra a todos sus hijos; editar un **hijo**
+nunca altera al padre. Es el comportamiento natural de un esqueleto. No se
+permiten ciclos al asignar padre.
+
+## Atajos
+
+| Acción | Tecla |
+|---|---|
+| Herramienta Selección / Hueso | `V` / `B` |
+| Capturar frame | `K` |
+| Play / Detener | `Espacio` |
+| Renombrar selección | `F2` |
+| Borrar selección | `Supr` |
+| Deseleccionar | `Esc` |
+| Zoom / Paneo | rueda / botón central |
+| Ajustar rotación a 15° | `Ctrl` mientras rotas |
+| Guardar / Guardar como | `Ctrl+S` / `Ctrl+Shift+S` |
+| Abrir / Nuevo | `Ctrl+O` / `Ctrl+N` |
+| Exportar hoja | `Ctrl+E` |
+| Deshacer / Rehacer | `Ctrl+Z` / `Ctrl+Y` (o `Ctrl+Shift+Z`) |
+| Ayuda | `H` / `F1` |
+
+## Archivos
+
+- Proyectos: **`.pbproj`** (JSON legible; las rutas de imagen se guardan
+  relativas al proyecto para que sea portable).
+- **Recuperación ante cierre brusco**: cada 15 s se autoguarda el estado en
+  `~/.pixelbones/recovery.json`. Si el programa se cierra de golpe, al reabrir
+  se ofrece *Recuperar*. Un guardado manual limpia ese archivo.
+- El título de la ventana muestra `*` cuando hay cambios sin guardar.
+
+## Arquitectura (para extender)
+
+```
+pixelbones/
+  model.py        datos + matemática (sprites, huesos, FK; puro, sin pygame)
+  render.py       dibujo y exportación con pygame (comparte la matemática)
+  history.py      deshacer/rehacer por snapshots
+  recovery.py     autosave / recuperación ante cierre brusco
+  filebrowser.py  explorador de archivos propio (en pygame, sin tkinter)
+  dialogs.py      capa fina sobre filebrowser (abrir/guardar/exportar)
+  app.py          editor interactivo (bucle, herramientas, paneles, timeline)
+main.py           punto de entrada
+```
+
+El núcleo (`model` + `render`) no depende de la GUI, así que se puede usar como
+librería para generar spritesheets por script.
+
+## Licencia
+
+Software libre. Úsalo, modifícalo y compártelo.
