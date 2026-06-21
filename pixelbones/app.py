@@ -139,7 +139,7 @@ class App:
 
         self._thumbs = []
         self._thumbs_dirty = True
-        self._fold = {}            # secciones plegadas del panel derecho
+        self._fold = {"assign": True}   # 'asignar' colapsado (se abre al cargar plantilla)
         self._right_scroll = 0     # desplazamiento vertical del panel derecho
         self.modal = None          # ("template", [(nombre,ruta)...]) | None
         self._drawing_modal = False
@@ -783,11 +783,10 @@ class App:
     # plantillas (esqueleto + animaciones reutilizables)
     # ====================================================================
     def open_template_picker(self):
-        tpls = templates.list_templates()
-        if not tpls:
-            self.status = "No hay plantillas. Usa 'Guardar plantilla' primero."
-            return
-        self.modal = ("template", tpls)
+        self.modal = ("template", templates.list_templates())
+
+    def open_export_menu(self):
+        self.modal = ("export", None)
 
     def save_current_as_template(self):
         if not self.project.bones:
@@ -2352,22 +2351,56 @@ class App:
         self._drawing_modal = True
         w, h = self.screen.get_size()
         if kind == "template":
+            rows = data or []
             mw = 360
-            rows = data
-            mh = 70 + len(rows) * 30 + 30
+            mh = 92 + max(1, len(rows)) * 30 + 64
             r = pygame.Rect((w - mw) // 2, (h - mh) // 2, mw, mh)
             pygame.draw.rect(self.screen, PANEL, r, border_radius=8)
             pygame.draw.rect(self.screen, ACCENT, r, 1, border_radius=8)
-            self.text("Cargar plantilla", (r.x + 14, r.y + 12), ACCENT,
-                      font=self.font_b)
+            self.text("Plantillas", (r.x + 14, r.y + 12), ACCENT, font=self.font_b)
             self.text("(esqueleto + animaciones; tu dibujas y asignas)",
                       (r.x + 14, r.y + 32), DIM, font=self.font_s)
             y = r.y + 56
+            if not rows:
+                self.text("No hay plantillas aún.", (r.x + 14, y), DIM,
+                          font=self.font_s)
+                y += 28
             for name, path in rows:
                 br = pygame.Rect(r.x + 12, y, mw - 24, 26)
-                if self.button(br, name):
+                if self.button(br, "Cargar: " + name):
                     self.modal = None
                     self.load_template(path)
+                    self._drawing_modal = False
+                    return
+                y += 30
+            pygame.draw.line(self.screen, LINE, (r.x + 12, y + 4),
+                             (r.right - 12, y + 4))
+            sv = pygame.Rect(r.x + 12, y + 12, mw - 24, 26)
+            if self.button(sv, "Guardar proyecto actual como plantilla"):
+                self.modal = None
+                self.save_current_as_template()
+                self._drawing_modal = False
+                return
+            cr = pygame.Rect(r.x + 12, r.bottom - 34, mw - 24, 24)
+            if self.button(cr, "Cancelar (Esc)"):
+                self.modal = None
+        elif kind == "export":
+            opts = [("Exportar hoja (todo junto)", self.export_composite),
+                    ("Exportar capas (una por sprite)", self.export_layers),
+                    ("Exportar material (recortado + conexión)", self.export_connection)]
+            mw = 360
+            mh = 70 + len(opts) * 30 + 30
+            r = pygame.Rect((w - mw) // 2, (h - mh) // 2, mw, mh)
+            pygame.draw.rect(self.screen, PANEL, r, border_radius=8)
+            pygame.draw.rect(self.screen, ACCENT, r, 1, border_radius=8)
+            self.text("Exportar", (r.x + 14, r.y + 12), ACCENT, font=self.font_b)
+            self.text("(elige el formato de salida)", (r.x + 14, r.y + 32), DIM,
+                      font=self.font_s)
+            y = r.y + 56
+            for label, fn in opts:
+                if self.button(pygame.Rect(r.x + 12, y, mw - 24, 26), label):
+                    self.modal = None
+                    fn()
                     self._drawing_modal = False
                     return
                 y += 30
@@ -2850,18 +2883,11 @@ class App:
                        active=True):
             self.import_images()
         x += 132
-        for label, fn in [("Exportar hoja", self.export_composite),
-                          ("Exportar capas", self.export_layers),
-                          ("Exportar material", self.export_connection)]:
+        # Menús desplegables (compactos) para no desbordar la barra.
+        for label, fn in [("Exportar ▾", self.open_export_menu),
+                          ("Plantillas ▾", self.open_template_picker)]:
             w = self.font_s.size(label)[0] + 16
             if self.button(pygame.Rect(x, 5, w, 26), label):
-                fn()
-            x += w + 4
-        x += 8
-        for label, fn in [("Plantillas", self.open_template_picker),
-                          ("Guardar plantilla", self.save_current_as_template)]:
-            w = self.font_s.size(label)[0] + 16
-            if self.button(pygame.Rect(x, 5, w, 26), label, active=(label == "Plantillas")):
                 fn()
             x += w + 4
         x += 8
