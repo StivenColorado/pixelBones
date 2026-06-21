@@ -309,6 +309,15 @@ class App:
                 else:
                     self.status = ("Taller de dibujo. Crea uno con 'Nuevo "
                                    "dibujo' y, al terminar, 'Enviar como material'.")
+            # Si el lienzo activo está VACÍO, sincronízalo con el tile actual
+            # (así cambiar el tamaño en Animar y pasar a Pintar "simplemente
+            # funciona"). No se toca un dibujo con contenido.
+            d = self.paint_target()
+            tw, th = self.project.tile_w, self.project.tile_h
+            if d is not None and d.size != (tw, th):
+                bb = d.surface.get_bounding_rect(min_alpha=1) if d.surface else None
+                if not bb or bb.width == 0:        # lienzo vacío
+                    self.resize_active_drawing(tw, th)
             self._fit_canvas_view()
             if self.paint_target() is not None:
                 self.status = "Modo PINTAR (taller). Tab vuelve a Animar."
@@ -1741,6 +1750,26 @@ class App:
         self._fit_canvas_view()
         self._thumbs_dirty = True
         self.status = "Dibujo nuevo. Pinta y luego 'Enviar como material'."
+
+    def resize_active_drawing(self, w, h):
+        """Redimensiona el lienzo del dibujo activo a (w,h), conservando el
+        contenido (anclado arriba-izquierda). Para sincronizar con el tile."""
+        d = self.paint_target()
+        if d is None:
+            return
+        self.snapshot()
+        for lay in d.layers:
+            new = pygame.Surface((w, h), pygame.SRCALPHA)
+            if lay.surface is not None:
+                new.blit(lay.surface, (0, 0))
+            lay.surface = new
+        d.pivot = [w / 2.0, h / 2.0]
+        render.flatten_sprite(d)
+        self.paint_undo.clear()
+        self.paint_redo.clear()
+        self._fit_canvas_view()
+        self._thumbs_dirty = True
+        self.status = f"Lienzo redimensionado a {w}x{h}."
 
     def draw_select(self, i):
         if 0 <= i < len(self.project.drawings):
@@ -3468,6 +3497,26 @@ class App:
         if ch:
             self.paint.shade_amount = max(0.01, min(1.0, v / 100.0))
         y += 30
+        pygame.draw.line(self.screen, LINE, (p.x + 6, y), (p.right - 6, y))
+        y += 8
+        self.text("LIENZO", (x, y), ACCENT, font=self.font_s)
+        y += 18
+        d = self.paint_target()
+        tw, th = self.project.tile_w, self.project.tile_h
+        if d and d.size:
+            same = (d.size == (tw, th))
+            self.text(f"Tamaño actual: {d.size[0]}x{d.size[1]}"
+                      + ("  (= tile)" if same else ""), (x + 2, y), DIM,
+                      font=self.font_s)
+            y += 18
+            if self.button(pygame.Rect(x, y, w, 24),
+                           f"Redimensionar al tile ({tw}x{th})", enabled=not same):
+                self.resize_active_drawing(tw, th)
+            y += 28
+        else:
+            self.text("Crea un 'Nuevo dibujo' (sale al tamaño del tile).",
+                      (x + 2, y), DIM, font=self.font_s)
+            y += 22
         pygame.draw.line(self.screen, LINE, (p.x + 6, y), (p.right - 6, y))
         y += 8
         self.text("GUARDAR IMAGEN", (x, y), ACCENT, font=self.font_s)
