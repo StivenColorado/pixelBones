@@ -355,10 +355,47 @@ class App:
         elif e.unicode and e.unicode.isprintable() and len(self.edit_buf) < 40:
             self.edit_buf += e.unicode
 
+    def _num_field(self, x, w, y, key, label, value):
+        """Campo numérico EDITABLE escribiendo (clic -> teclea -> Enter). Para el
+        tamaño del lienzo (tile_w/tile_h) y la caja (box_x/box_y)."""
+        self.text(label, (x + 4, y + 4), TEXT, font=self.font_s)
+        rect = pygame.Rect(x + 90, y, w - 90, 22)
+        editing = self.editing == ("edit_num", key)
+        hot = rect.collidepoint(self.mouse)
+        col = ACTIVE if editing else (HOVER if hot else PANEL2)
+        pygame.draw.rect(self.screen, col, rect, border_radius=3)
+        pygame.draw.rect(self.screen, LINE, rect, 1, border_radius=3)
+        if editing:
+            caret = "|" if (pygame.time.get_ticks() // 400) % 2 else ""
+            self.text(self.edit_buf + caret, (rect.right - 6, rect.centery),
+                      TEXT, font=self.font_s, right=True)
+        else:
+            self.text(f"{value:g}", (rect.right - 6, rect.centery), TEXT,
+                      font=self.font_s, right=True)
+            self.text("escribe", (rect.x + 6, rect.centery - 7), DIM,
+                      font=self.font_s)
+        if self.lmb_down and hot and not editing:
+            if self.editing and self.editing[0] == "edit_num":
+                self._commit_rename()        # confirma el campo anterior
+            self.editing = ("edit_num", key)
+            self.edit_buf = f"{value:g}"
+            self.lmb_down = False
+
     def _commit_rename(self):
         kind, idx = self.editing
         new = self.edit_buf.strip()
         self.editing = None
+        if kind == "edit_num":
+            try:
+                val = float(new)
+            except ValueError:
+                return
+            if idx in ("tile_w", "tile_h"):
+                setattr(self.project, idx, max(1, int(round(val))))
+            else:
+                setattr(self.project, idx, val)
+            self._thumbs_dirty = True
+            return
         if not new:
             return
         if kind == "rename_sprite" and idx < len(self.project.sprites):
@@ -3491,22 +3528,12 @@ class App:
 
         open3, y = self._fold_header(x, w, y, p, "tile", "TILE / PROYECTO")
         if open3:
-            for key, lbl, step in (("tile_w", "Tile ancho", 0.25),
-                                   ("tile_h", "Tile alto", 0.25)):
-                self.text(lbl, (x + 4, y + 4), TEXT, font=self.font_s)
-                v, ch = self.scrub("g_" + key, pygame.Rect(x + 90, y, w - 90, 22),
-                                   getattr(self.project, key), step)
-                if ch:
-                    setattr(self.project, key, max(1, int(round(v))))
-                    self._thumbs_dirty = True
-                y += 26
-            for key, lbl in (("box_x", "Caja X"), ("box_y", "Caja Y")):
-                self.text(lbl, (x + 4, y + 4), TEXT, font=self.font_s)
-                v, ch = self.scrub("g_" + key, pygame.Rect(x + 90, y, w - 90, 22),
-                                   getattr(self.project, key), 0.5)
-                if ch:
-                    setattr(self.project, key, v)
-                    self._thumbs_dirty = True
+            self.text("Tamaño del lienzo (clic y escribe):", (x, y), DIM,
+                      font=self.font_s)
+            y += 18
+            for key, lbl in (("tile_w", "Tile ancho"), ("tile_h", "Tile alto"),
+                             ("box_x", "Caja X"), ("box_y", "Caja Y")):
+                self._num_field(x, w, y, key, lbl, getattr(self.project, key))
                 y += 26
 
         self._right_content_h = y - y0 + 8
