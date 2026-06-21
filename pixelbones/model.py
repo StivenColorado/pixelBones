@@ -22,6 +22,28 @@ import zlib
 import pygame
 
 
+# Puntos de conexion (sockets) reservados. SOLO para piezas RIGIDAS que el juego
+# coloca por su CENTRO sobre un punto (rasgos de la cara y objetos en la mano):
+# cada material declara a cual se pega -> el juego lo ubica solo, pequeno.
+# La ROPA NO usa sockets: se VINCULA a huesos (Sigue al hueso) y se hornea en la
+# hoja como overlay, asi las mangas/perneras siguen el mismo movimiento del rig.
+SOCKETS = ["mano_izq", "mano_der", "ojos", "pelo", "nariz", "boca",
+           "pierna_izq", "pierna_der", "zapato_izq", "zapato_der"]
+
+SOCKET_LABELS = {
+    "mano_izq": "Mano izq", "mano_der": "Mano der", "ojos": "Ojos",
+    "pelo": "Pelo", "nariz": "Nariz", "boca": "Boca",
+    "pierna_izq": "Pierna izq", "pierna_der": "Pierna der",
+    "zapato_izq": "Zapato izq", "zapato_der": "Zapato der",
+}
+
+# Huesos sugeridos del esqueleto humanoide (para vincular cuerpo y ropa). No son
+# sockets: son el rig al que se enganchan las piezas con "Sigue al hueso".
+SKELETON_BONES = ["cadera", "torso", "cabeza", "brazo_izq", "brazo_der",
+                  "mano_izq_h", "mano_der_h", "pierna_izq", "pierna_der",
+                  "pie_izq", "pie_der"]
+
+
 def default_pose():
     return {"x": 0.0, "y": 0.0, "rot": 0.0, "scale": 1.0}
 
@@ -102,6 +124,7 @@ class Sprite:
         self.transform = default_pose()    # colocacion libre (pivot en mundo)
         self.bone = None                   # nombre de hueso vinculado | None
         self.local = default_pose()        # offset relativo al hueso (si bone)
+        self.connection = None             # socket al que se PEGA (centro) | None
         self.z = 0
         self.visible = True
         self.layers = []               # list[Layer]; vacia => se crea al cargar
@@ -115,6 +138,7 @@ class Sprite:
         return {"name": self.name, "image_path": self.image_path,
                 "pivot": list(self.pivot), "transform": clone_pose(self.transform),
                 "bone": self.bone, "local": clone_pose(self.local),
+                "connection": self.connection,
                 "z": self.z, "visible": self.visible,
                 "layers": [l.to_dict() for l in self.layers],
                 "active_layer": self.active_layer}
@@ -126,6 +150,7 @@ class Sprite:
         s.transform = clone_pose(d.get("transform", default_pose()))
         s.bone = d.get("bone")
         s.local = clone_pose(d.get("local", default_pose()))
+        s.connection = d.get("connection")
         s.z = d.get("z", 0)
         s.visible = d.get("visible", True)
         s.layers = [Layer.from_dict(ld) for ld in d.get("layers", [])]

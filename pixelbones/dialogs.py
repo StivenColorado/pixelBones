@@ -58,6 +58,15 @@ def save_png_as():
                 exts=(".png",), default_name="spritesheet.png")
 
 
+def save_template_as():
+    if HOST is None:
+        return None
+    from . import templates
+    os.makedirs(templates.TEMPLATES_DIR, exist_ok=True)
+    return _run(start_dir=templates.TEMPLATES_DIR, title="Guardar plantilla",
+                mode="save", exts=(".pbproj",), default_name="humano.pbproj")
+
+
 def choose_dir():
     if HOST is None:
         return None

@@ -136,15 +136,58 @@ def render_tile(project, frame, sprites_filter=None, box=None):
     return tile
 
 
-def pack_clips_sheet(project, sprites_filter=None):
+def content_box(project, sprites_filter=None, margin=1):
+    """bbox en mundo (bx, by, w, h) que envuelve el contenido de los sprites
+    dados a lo largo de TODOS los frames de TODOS los clips. Sirve para exportar
+    un material RECORTADO a su tamano real (no al tile del cuerpo). None si vacio.
+    """
+    sprites = [(i, s) for i, s in enumerate(project.sprites)
+               if s.visible and s.surface is not None and s.content_rect
+               and (sprites_filter is None or i in sprites_filter)]
+    if not sprites:
+        return None
+    minx = miny = 1e9
+    maxx = maxy = -1e9
+    clips = project.clips or [model.Clip("animacion")]
+    for c in clips:
+        frames = c.frames or [None]
+        for f in frames:
+            pose_for = model.pose_for_frame(project, f)
+            for _, sp in sprites:
+                wt = model.sprite_world(project, sp, pose_for)
+                cx, cy, cw, ch = sp.content_rect
+                for ix, iy in ((cx, cy), (cx + cw, cy),
+                               (cx + cw, cy + ch), (cx, cy + ch)):
+                    ox, oy = model._rot((ix - sp.pivot[0]) * wt[3],
+                                        (iy - sp.pivot[1]) * wt[3], wt[2])
+                    px, py = wt[0] + ox, wt[1] + oy
+                    minx, maxx = min(minx, px), max(maxx, px)
+                    miny, maxy = min(miny, py), max(maxy, py)
+    if minx > maxx:
+        return None
+    bx, by = math.floor(minx - margin), math.floor(miny - margin)
+    return (bx, by, int(math.ceil(maxx + margin)) - bx,
+            int(math.ceil(maxy + margin)) - by)
+
+
+def part_connection(project):
+    """Socket al que se pega el material exportado (el primer sprite con conexion)."""
+    for s in project.sprites:
+        if getattr(s, "connection", None):
+            return s.connection
+    return None
+
+
+def pack_clips_sheet(project, sprites_filter=None, box_override=None):
     """Hoja unica con UNA FILA POR ANIMACION (clip). Cada fila usa el tamano de
     frame de su clip (puede ser mas ancho/alto). El ancho de la hoja lo fija la
-    fila mas larga; el alto es la suma de los altos de cada fila."""
+    fila mas larga; el alto es la suma de los altos de cada fila. Si box_override
+    se da, TODAS las filas usan ese recuadro (export recortado del material)."""
     clips = project.clips or [model.Clip("animacion")]
     rows = []
     total_h, max_w = 0, 0
     for c in clips:
-        bx, by, cw, ch = clip_box(project, c)
+        bx, by, cw, ch = box_override if box_override else clip_box(project, c)
         nf = max(1, len(c.frames))
         rows.append((c, bx, by, cw, ch))
         total_h += int(round(ch))
@@ -161,19 +204,27 @@ def pack_clips_sheet(project, sprites_filter=None):
     return sheet
 
 
-def build_meta(project):
+def build_meta(project, box_override=None, connection=None):
     """Metadata de la hoja para el juego (sidecar JSON).
 
     Incluye, por animacion (fila) y por frame, el transform de los huesos
-    marcados como ANCLA (mano, etc.) en pixeles del tile: posicion del nodo
-    (x,y), angulo en grados (ang, horario), escala, y la punta (tx,ty). El
-    juego coloca cualquier arma en ese transform -> se siente sostenida.
+    marcados como ANCLA (mano, ojos, pelo...) en pixeles del tile: posicion del
+    nodo (x,y), angulo en grados (ang, horario), escala, y la punta (tx,ty). El
+    juego coloca cualquier item/material en ese transform -> se siente pegado.
+
+    box_override recorta todas las filas a ese recuadro (export de material).
+    connection (socket id) marca a que punto del cuerpo se pega ESTE material
+    por su centro -> el juego lo ubica solo.
     """
     anchors = [(i, b) for i, b in enumerate(project.bones)
                if getattr(b, "anchor", False)]
-    meta = {"frame_w": project.tile_w, "frame_h": project.tile_h, "rows": []}
+    fw = box_override[2] if box_override else project.tile_w
+    fh = box_override[3] if box_override else project.tile_h
+    meta = {"frame_w": fw, "frame_h": fh, "rows": []}
+    if connection:
+        meta["connection"] = {"socket": connection, "pivot": "center"}
     for c in (project.clips or []):
-        bx, by, cw, ch = clip_box(project, c)        # anchors relativos a ESTA fila
+        bx, by, cw, ch = box_override if box_override else clip_box(project, c)
         frames = c.frames or [None]
         row = {"name": c.name, "frames": max(1, len(c.frames)),
                "frame_w": int(round(cw)), "frame_h": int(round(ch)),
@@ -195,16 +246,30 @@ def build_meta(project):
     return meta
 
 
-def export_meta(project, path):
+def export_meta(project, path, box_override=None, connection=None):
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump(build_meta(project), fh, indent=2, ensure_ascii=False)
+        json.dump(build_meta(project, box_override, connection),
+                  fh, indent=2, ensure_ascii=False)
     return path
 
 
-def export_composite(project, out_path):
-    sheet = pack_clips_sheet(project)
+def export_composite(project, out_path, box_override=None):
+    sheet = pack_clips_sheet(project, box_override=box_override)
     pygame.image.save(sheet, out_path)
     return sheet.get_size()
+
+
+def export_part(project, png_path, margin=1):
+    """Exporta el material RECORTADO a su tamano real + su .json con la conexion.
+    Pensado para capas (ojos, pelo, boca...) que se pegan a un socket del cuerpo:
+    el juego centra este PNG en el punto de conexion, sin redibujarlo grande."""
+    box = content_box(project, margin=margin)
+    conn = part_connection(project)
+    sheet = pack_clips_sheet(project, box_override=box)
+    pygame.image.save(sheet, png_path)
+    meta_path = os.path.splitext(png_path)[0] + ".json"
+    export_meta(project, meta_path, box_override=box, connection=conn)
+    return sheet.get_size(), conn
 
 
 def export_per_layer(project, out_dir):

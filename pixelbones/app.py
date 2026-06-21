@@ -13,7 +13,7 @@ import math
 import os
 import pygame
 
-from . import model, render, dialogs, recovery, paint, config, appicon
+from . import model, render, dialogs, recovery, paint, config, appicon, templates
 from .history import History
 
 # ---- tema -----------------------------------------------------------------
@@ -139,6 +139,10 @@ class App:
 
         self._thumbs = []
         self._thumbs_dirty = True
+        self._fold = {}            # secciones plegadas del panel derecho
+        self._right_scroll = 0     # desplazamiento vertical del panel derecho
+        self.modal = None          # ("template", [(nombre,ruta)...]) | None
+        self._drawing_modal = False
 
         dialogs.set_host(self)
         self.status = ("Importa imagenes (boton 'Importar imagen' o arrastra "
@@ -201,6 +205,10 @@ class App:
         self.layout()
 
     def _hotkey(self, key):
+        if self.modal is not None:
+            if key == pygame.K_ESCAPE:
+                self.modal = None
+            return
         mods = pygame.key.get_mods()
         ctrl = mods & pygame.KMOD_CTRL
         shift = mods & pygame.KMOD_SHIFT
@@ -420,6 +428,8 @@ class App:
         }
 
     def _handle_splitters(self):
+        if self.modal is not None:
+            return False
         w, h = self.screen.get_size()
         rects = self._splitter_rects()
         if self.split_drag is None and self.lmb_down:
@@ -692,6 +702,183 @@ class App:
         cur = sp.bone if sp.bone in options else None
         pos = options.index(cur)
         self.bind_sprite(sprite_idx, options[(pos + direction) % len(options)])
+
+    # ====================================================================
+    # conexiones (sockets)
+    # ====================================================================
+    def cycle_connection(self, sprite_idx, direction):
+        """Asigna a un material el socket al que se pega (centro -> punto)."""
+        sp = self.project.sprites[sprite_idx]
+        options = [None] + list(model.SOCKETS)
+        cur = sp.connection if sp.connection in options else None
+        self.snapshot()
+        sp.connection = options[(options.index(cur) + direction) % len(options)]
+        self.dirty = True
+        self.status = (f"Material '{sp.name}' se pega a "
+                       f"'{sp.connection}'." if sp.connection
+                       else f"Material '{sp.name}' sin conexion.")
+
+    # posicion por defecto de cada socket dentro del tile (fracciones x,y) cuando
+    # se crea SIN un hueso seleccionado -> cada uno cae en un sitio logico.
+    _SOCKET_DEFAULT = {
+        "pelo": (0.50, 0.08), "ojos": (0.50, 0.18), "nariz": (0.50, 0.25),
+        "boca": (0.50, 0.31), "mano_izq": (0.18, 0.55), "mano_der": (0.82, 0.55),
+        "pierna_izq": (0.40, 0.74), "pierna_der": (0.60, 0.74),
+        "zapato_izq": (0.40, 0.95), "zapato_der": (0.60, 0.95),
+    }
+
+    def create_socket(self, sid):
+        """Crea (o selecciona) el punto de conexion 'sid' en el cuerpo. Es un
+        anchor con nombre reservado: sigue el rig por frame como cualquier hueso.
+
+        - Si hay un HUESO seleccionado, el punto se crea PEGADO a su punta (hijo
+          suyo) -> se mueve con ese hueso, sin arrastrarlo al centro.
+        - Si no, cae en una posicion logica segun el socket (ojos arriba, etc.).
+        """
+        lbl = model.SOCKET_LABELS.get(sid, sid)
+        idx = self.project.bone_by_name(sid)
+        if idx >= 0:                                    # ya existe -> seleccionar
+            self.project.bones[idx].anchor = True
+            self.sel_kind, self.sel_idx = "bone", idx
+            self.status = (f"Punto '{lbl}' ya existe: seleccionado. Arrastralo, "
+                           "o 'Borrar hueso (Supr)' para quitarlo.")
+            return
+        self.snapshot()
+        b = model.Bone(sid)
+        b.anchor = True
+        b.length = 10.0
+        # posicion facial/logica del socket (en mundo)
+        fx, fy = self._SOCKET_DEFAULT.get(sid, (0.5, 0.5))
+        wx = self.project.box_x + self.project.tile_w * fx
+        wy = self.project.box_y + self.project.tile_h * fy
+        sel_bone = self.selected_bone() if self.sel_kind == "bone" else None
+        # solo se pega a un hueso del RIG (no a otro socket: evita encadenarlos).
+        if sel_bone is not None and sel_bone.name in model.SOCKETS:
+            sel_bone = None
+        if sel_bone is not None:        # HIJO del hueso elegido, en su sitio facial
+            pidx = self.sel_idx
+            pw = model.bone_world(self.project, pidx, self.pose_for())
+            dx, dy = wx - pw[0], wy - pw[1]
+            aa = math.radians(-pw[2])
+            cc, ss = math.cos(aa), math.sin(aa)
+            psc = pw[3] or 1.0
+            b.parent = pidx
+            b.rest = {"x": (dx * cc - dy * ss) / psc,
+                      "y": (dx * ss + dy * cc) / psc,
+                      "rot": -pw[2], "scale": 1.0}
+            msg = (f"'{lbl}' enlazado al hueso '{sel_bone.name}': se coloco en su "
+                   "sitio y seguira ese hueso (toda la cara con uno solo).")
+        else:                                           # punto libre en su sitio
+            b.parent = -1
+            b.rest = {"x": wx, "y": wy, "rot": 0.0, "scale": 1.0}
+            msg = (f"Punto '{lbl}' creado. Selecciona el hueso 'cabeza' y pulsa de "
+                   "nuevo para enlazar toda la cara a el.")
+        self.project.bones.append(b)
+        self.working[b.name] = model.clone_pose(b.rest)
+        self.sel_kind, self.sel_idx = "bone", len(self.project.bones) - 1
+        self.dirty = True
+        self.status = msg
+
+    # ====================================================================
+    # plantillas (esqueleto + animaciones reutilizables)
+    # ====================================================================
+    def open_template_picker(self):
+        tpls = templates.list_templates()
+        if not tpls:
+            self.status = "No hay plantillas. Usa 'Guardar plantilla' primero."
+            return
+        self.modal = ("template", tpls)
+
+    def save_current_as_template(self):
+        if not self.project.bones:
+            self.status = "La plantilla necesita huesos (rig) para reutilizarse."
+            return
+        path = dialogs.save_template_as()
+        if not path:
+            return
+        try:
+            templates.strip_art(self.project).save(path)
+            n = len(self.project.clips)
+            self.status = (f"Plantilla guardada: {os.path.basename(path)} "
+                           f"({len(self.project.bones)} huesos, {n} animaciones).")
+        except Exception as e:
+            self.status = f"Error al guardar plantilla: {e}"
+
+    def load_template(self, path):
+        try:
+            pr = templates.load_template(path)
+        except Exception as e:
+            self.status = f"No se pudo cargar la plantilla: {e}"
+            return
+        self.snapshot()
+        self.project = pr
+        self.sel_kind, self.sel_idx = None, -1
+        self.cur_clip = 0
+        self.cur_frame = -1
+        self.sync_working()
+        self._thumbs_dirty = True
+        self.dirty = True
+        self._fold["assign"] = False        # abrir el asistente
+        self.status = (f"Plantilla cargada ({len(pr.bones)} huesos, "
+                       f"{len(pr.clips)} animaciones). Importa tu arte y asignalo "
+                       "a los huesos (panel derecho).")
+
+    def _sprite_centroid_world(self, sp):
+        """Centro del CONTENIDO del sprite en mundo (mejor que el pivot para
+        decidir a que hueso pertenece)."""
+        wt = model.sprite_world(self.project, sp, self.pose_for())
+        if sp.content_rect:
+            cx, cy, cw, ch = sp.content_rect
+            mx, my = cx + cw / 2.0, cy + ch / 2.0
+        else:
+            mx = my = 0.0
+        ox, oy = model._rot((mx - sp.pivot[0]) * wt[3],
+                            (my - sp.pivot[1]) * wt[3], wt[2])
+        return wt[0] + ox, wt[1] + oy
+
+    def auto_assign_bones(self):
+        """Vincula cada sprite al HUESO (segmento) mas cercano a su contenido, no
+        al torso por defecto: asi brazos/piernas caen en su hueso."""
+        if not self.project.sprites or not self.project.bones:
+            self.status = "Importa arte y carga una plantilla con huesos primero."
+            return
+        self.snapshot()
+        pose = self.pose_for()
+        segs = []
+        for i, b in enumerate(self.project.bones):
+            bw = model.bone_world(self.project, i, pose)
+            tip = model.bone_tip(self.project, i, bw)
+            segs.append((b.name, (bw[0], bw[1]), tip))
+        for sp in self.project.sprites:
+            cwx, cwy = self._sprite_centroid_world(sp)
+            best, bd = None, 1e9
+            for name, head, tip in segs:
+                d = _seg_dist((cwx, cwy), head, tip)
+                if d < bd:
+                    bd, best = d, name
+            if best:
+                sw = model.sprite_world(self.project, sp, pose)
+                bidx = self.project.bone_by_name(best)
+                bw = model.bone_world(self.project, bidx, pose)
+                sp.bone = best
+                sp.local = model.compute_local(bw, sw)
+        self._thumbs_dirty = True
+        self.status = "Arte asignado por cercania al hueso. Revisa y corrige."
+
+    def generate_draft_anims(self):
+        """Anade animaciones BORRADOR (agacharse/sentado/atacar/cortar) al
+        proyecto actual, para editarlas. No vienen en la plantilla por defecto."""
+        if not self.project.bones:
+            self.status = "Necesitas un rig (carga una plantilla) primero."
+            return
+        self.snapshot()
+        added = templates.build_extra_animations(self.project)
+        self._thumbs_dirty = True
+        if added:
+            self.status = ("Animaciones borrador anadidas: " + ", ".join(added) +
+                           ". Son aproximadas: ajustalas en la linea de tiempo.")
+        else:
+            self.status = "No se anadieron (ya existian)."
 
     # ====================================================================
     # huesos
@@ -1192,6 +1379,29 @@ class App:
             render.export_meta(self.project, os.path.join(d, "metadata.json"))
             self.status = (f"{len(files)} hojas por capa (filas = animaciones) "
                            f"+ metadata.json -> {os.path.basename(d)}/")
+        except Exception as e:
+            self.status = f"Error export: {e}"
+
+    def export_connection(self):
+        """Exporta el material RECORTADO a su tamano real + .json con su conexion.
+        El juego centra este PNG en el punto de conexion del cuerpo."""
+        if not self.project.sprites:
+            self.status = "No hay imagenes para exportar."
+            return
+        auto = self._mirror_path(".png")              # espejo art-src -> assets
+        if auto:
+            path = auto
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        else:
+            path = dialogs.save_png_as()
+            if not path:
+                return
+        try:
+            sz, conn = render.export_part(self.project, path)
+            shown = (os.path.relpath(path, self.project_root)
+                     if self.project_root and auto else os.path.basename(path))
+            tag = f"conexion '{conn}'" if conn else "SIN conexion (asignala)"
+            self.status = (f"Material {sz[0]}x{sz[1]} ({tag}) -> {shown} + .json")
         except Exception as e:
             self.status = f"Error export: {e}"
 
@@ -1892,6 +2102,8 @@ class App:
     # interaccion del canvas (modo Animar)
     # ====================================================================
     def _handle_canvas(self):
+        if self.modal is not None:
+            return
         if self.mode == "paint":
             self._handle_paint_canvas()
             return
@@ -2109,6 +2321,10 @@ class App:
     # ====================================================================
     def _draw(self):
         self.screen.fill(BG)
+        # con un modal abierto, la UI de fondo no debe recibir clicks
+        saved_lmb = self.lmb_down
+        if self.modal is not None:
+            self.lmb_down = False
         if self.mode == "paint":
             self._draw_paint_canvas()
         else:
@@ -2123,6 +2339,42 @@ class App:
             self._draw_recovery_banner()
         if self.show_help:
             self._draw_help()
+        if self.modal is not None:
+            self.lmb_down = saved_lmb
+            self._draw_modal()
+
+    def _draw_modal(self):
+        kind, data = self.modal
+        # velo
+        veil = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+        veil.fill((0, 0, 0, 150))
+        self.screen.blit(veil, (0, 0))
+        self._drawing_modal = True
+        w, h = self.screen.get_size()
+        if kind == "template":
+            mw = 360
+            rows = data
+            mh = 70 + len(rows) * 30 + 30
+            r = pygame.Rect((w - mw) // 2, (h - mh) // 2, mw, mh)
+            pygame.draw.rect(self.screen, PANEL, r, border_radius=8)
+            pygame.draw.rect(self.screen, ACCENT, r, 1, border_radius=8)
+            self.text("Cargar plantilla", (r.x + 14, r.y + 12), ACCENT,
+                      font=self.font_b)
+            self.text("(esqueleto + animaciones; tu dibujas y asignas)",
+                      (r.x + 14, r.y + 32), DIM, font=self.font_s)
+            y = r.y + 56
+            for name, path in rows:
+                br = pygame.Rect(r.x + 12, y, mw - 24, 26)
+                if self.button(br, name):
+                    self.modal = None
+                    self.load_template(path)
+                    self._drawing_modal = False
+                    return
+                y += 30
+            cr = pygame.Rect(r.x + 12, r.bottom - 34, mw - 24, 24)
+            if self.button(cr, "Cancelar (Esc)"):
+                self.modal = None
+        self._drawing_modal = False
 
     def _draw_canvas(self):
         c = self.r_canvas
@@ -2148,6 +2400,7 @@ class App:
             self._draw_links()
             self._draw_bones()
         if not self.playing:
+            self._draw_socket_overlay()
             self._draw_sprite_gizmo()
         if self.tool == "link" and not self.playing:
             self._draw_link_gesture()
@@ -2257,9 +2510,74 @@ class App:
         pygame.draw.circle(self.screen, SELECT, (int(hx), int(hy)), 6, 2)
         pygame.draw.circle(self.screen, SELECT, (int(pcx), int(pcy)), 3, 1)
 
+    def _draw_socket_overlay(self):
+        """Feedback grafico de las conexiones: un marcador con icono+nombre por
+        cada PUNTO del cuerpo (socket), y una etiqueta '-> Ojos' sobre cada
+        MATERIAL que ya tiene conexion asignada."""
+        pose = self.pose_for()
+        # 1) puntos del cuerpo (anchors con nombre de socket)
+        for idx, b in enumerate(self.project.bones):
+            if not getattr(b, "anchor", False) or b.name not in model.SOCKETS:
+                continue
+            wx, wy, _, _ = model.bone_world(self.project, idx, pose)
+            sx, sy = self.w2s(wx, wy)
+            sel = (self.sel_kind == "bone" and self.sel_idx == idx)
+            self._socket_marker(int(sx), int(sy), b.name, sel)
+        # 2) materiales con conexion -> etiqueta en su centro
+        for idx, sp in enumerate(self.project.sprites):
+            conn = getattr(sp, "connection", None)
+            if not conn or sp.surface is None:
+                continue
+            wt = model.sprite_world(self.project, sp, pose)
+            sx, sy = self.w2s(wt[0], wt[1])
+            sel = (self.sel_kind == "sprite" and self.sel_idx == idx)
+            self._conn_badge(int(sx), int(sy), conn, sel)
+
+    def _socket_marker(self, sx, sy, sid, sel):
+        col = (190, 255, 210) if sel else (110, 225, 155)
+        pygame.draw.circle(self.screen, col, (sx, sy), 10, 2)
+        pygame.draw.circle(self.screen, (18, 30, 24), (sx, sy), 3)
+        pygame.draw.circle(self.screen, col, (sx, sy), 1)
+        for a, b in (((-13, 0), (-5, 0)), ((5, 0), (13, 0)),
+                     ((0, -13), (0, -5)), ((0, 5), (0, 13))):
+            pygame.draw.line(self.screen, col, (sx + a[0], sy + a[1]),
+                             (sx + b[0], sy + b[1]))
+        lbl = model.SOCKET_LABELS.get(sid, sid)
+        tw = self.font_s.size(lbl)[0]
+        pill = pygame.Rect(sx + 13, sy - 9, tw + 24, 18)
+        bg = pygame.Surface(pill.size, pygame.SRCALPHA)
+        bg.fill((16, 38, 26, 225))
+        self.screen.blit(bg, pill)
+        pygame.draw.rect(self.screen, col, pill, 1, border_radius=4)
+        self._draw_icon(self._SOCKET_ICON.get(sid, "hand"),
+                        pygame.Rect(pill.x + 3, pill.y + 1, 16, 16), col)
+        self.text(lbl, (pill.x + 21, pill.y + 3), (225, 255, 235),
+                  font=self.font_s)
+
+    def _conn_badge(self, sx, sy, conn, sel):
+        col = SELECT if sel else ACCENT
+        pygame.draw.circle(self.screen, col, (sx, sy), 4, 1)
+        for a, b in (((-8, 0), (8, 0)), ((0, -8), (0, 8))):
+            pygame.draw.line(self.screen, col, (sx + a[0], sy + a[1]),
+                             (sx + b[0], sy + b[1]))
+        lbl = "→ " + model.SOCKET_LABELS.get(conn, conn)
+        tw = self.font_s.size(lbl)[0]
+        pill = pygame.Rect(sx - (tw + 24) // 2, sy - 26, tw + 24, 18)
+        bg = pygame.Surface(pill.size, pygame.SRCALPHA)
+        bg.fill((44, 36, 16, 225))
+        self.screen.blit(bg, pill)
+        pygame.draw.rect(self.screen, col, pill, 1, border_radius=4)
+        self._draw_icon(self._SOCKET_ICON.get(conn, "hand"),
+                        pygame.Rect(pill.x + 3, pill.y + 1, 16, 16), col)
+        self.text(lbl, (pill.x + 21, pill.y + 3), TEXT, font=self.font_s)
+
     def _draw_bones(self):
         pose = self.pose_for()
-        for idx in range(len(self.project.bones)):
+        for idx, b in enumerate(self.project.bones):
+            # los sockets se muestran como PUNTOS (en _draw_socket_overlay), no
+            # como huesos: asi la cara no se llena de triangulos.
+            if getattr(b, "anchor", False) and b.name in model.SOCKETS:
+                continue
             head, tip = self._bone_endpoints_screen(idx, pose)
             sel = (self.sel_kind == "bone" and self.sel_idx == idx)
             self._draw_one_bone(head, tip, sel)
@@ -2449,6 +2767,35 @@ class App:
             poly([(0, -9), (9, -1), (-9, -1)])               # techo
             pygame.draw.rect(self.screen, col,
                              pygame.Rect(*P(-6, -1), 12 * u, 9 * u), 1)
+        elif name in ("hand_l", "hand_r"):                   # mano (con flecha)
+            sgn = -1 if name == "hand_l" else 1
+            pts = [(-7, 2), (-7, 8), (6, 10), (8, 0), (8, -6), (6, -6),
+                   (6, -2), (4, -10), (2, -10), (3, -2), (1, -11), (-1, -11),
+                   (0, -1), (-3, -8), (-5, -7), (-2, 2)]
+            poly([(sgn * dx, dy) for dx, dy in pts], 1)
+        elif name == "eyes":                                 # dos ojos
+            for ex in (-5, 5):
+                poly([(ex - 4, 0), (ex, -3), (ex + 4, 0), (ex, 3)], 1)
+                circ((ex, 0), 1.4)
+        elif name == "hair":                                 # melena/flequillo
+            poly([(-9, 7), (-9, -1), (-5, -7), (0, -9), (5, -7), (9, -1),
+                  (9, 7), (6, 2), (3, 7), (0, 2), (-3, 7), (-6, 2)], 1)
+        elif name == "nose":                                 # perfil de nariz
+            poly([(0, -8), (4, 5), (-2, 5)], 1)
+            line((-2, 5), (-4, 7), 1); line((4, 5), (4, 7), 1)
+        elif name == "mouth":                                # sonrisa
+            for a, b in (((-8, -1), (-4, 4)), ((-4, 4), (4, 4)),
+                         ((4, 4), (8, -1))):
+                line(a, b, 2)
+        elif name == "shirt":                                # camiseta
+            poly([(-4, -7), (-9, -3), (-6, 1), (-4, -1), (-4, 9), (4, 9),
+                  (4, -1), (6, 1), (9, -3), (4, -7), (2, -4), (-2, -4)], 1)
+        elif name == "pants":                                # pantalon
+            poly([(-6, -8), (6, -8), (6, 9), (1, 9), (0, -1), (-1, 9),
+                  (-6, 9)], 1)
+        elif name == "shoes":                                # bota/zapato
+            poly([(-9, 7), (-9, 2), (-3, 2), (-1, -2), (-1, -8), (3, -8),
+                  (4, 2), (9, 4), (9, 7)], 1)
 
     def _tool_btn(self, rect, tool):
         active = self.tool == tool
@@ -2504,9 +2851,17 @@ class App:
             self.import_images()
         x += 132
         for label, fn in [("Exportar hoja", self.export_composite),
-                          ("Exportar capas", self.export_layers)]:
+                          ("Exportar capas", self.export_layers),
+                          ("Exportar material", self.export_connection)]:
             w = self.font_s.size(label)[0] + 16
             if self.button(pygame.Rect(x, 5, w, 26), label):
+                fn()
+            x += w + 4
+        x += 8
+        for label, fn in [("Plantillas", self.open_template_picker),
+                          ("Guardar plantilla", self.save_current_as_template)]:
+            w = self.font_s.size(label)[0] + 16
+            if self.button(pygame.Rect(x, 5, w, 26), label, active=(label == "Plantillas")):
                 fn()
             x += w + 4
         x += 8
@@ -3074,38 +3429,95 @@ class App:
         pygame.draw.line(self.screen, LINE, (p.x, p.y), (p.x, p.bottom))
         x = p.x + 10
         w = p.w - 20
-        self.text("PROPIEDADES", (x, p.y + 8), ACCENT, font=self.font_b)
-        y = p.y + 32
 
-        if self.sel_kind == "sprite" and self.selected_sprite():
-            y = self._props_sprite(x, w, y, p)
-        elif self.sel_kind == "bone" and self.selected_bone():
-            y = self._props_bone(x, w, y, p)
+        # scroll del panel (rueda cuando el raton esta encima)
+        content_h = getattr(self, "_right_content_h", 0)
+        max_scroll = max(0, content_h - (p.h - 14))
+        if self.wheel and p.collidepoint(self.mouse):
+            self._right_scroll -= self.wheel * 40
+            self.wheel = 0
+        self._right_scroll = max(0, min(self._right_scroll, max_scroll))
+
+        self.screen.set_clip(p)
+        y0 = p.y + 8 - self._right_scroll
+        y = y0
+
+        open_, y = self._fold_header(x, w, y, p, "props", "PROPIEDADES")
+        if open_:
+            if self.sel_kind == "sprite" and self.selected_sprite():
+                y = self._props_sprite(x, w, y, p)
+            elif self.sel_kind == "bone" and self.selected_bone():
+                y = self._props_bone(x, w, y, p)
+            else:
+                self.text("(nada seleccionado)", (x, y), DIM, font=self.font_s)
+                y += 26
+        y = self._divider(p, y)
+
+        open2, y = self._fold_header(x, w, y, p, "sockets", "CONEXIONES")
+        if open2:
+            y = self._draw_sockets(x, w, y, p)
+        y = self._divider(p, y)
+
+        openA, y = self._fold_header(x, w, y, p, "assign", "PLANTILLA — asignar")
+        if openA:
+            y = self._draw_assign(x, w, y, p)
+        y = self._divider(p, y)
+
+        open3, y = self._fold_header(x, w, y, p, "tile", "TILE / PROYECTO")
+        if open3:
+            for key, lbl, step in (("tile_w", "Tile ancho", 0.25),
+                                   ("tile_h", "Tile alto", 0.25)):
+                self.text(lbl, (x + 4, y + 4), TEXT, font=self.font_s)
+                v, ch = self.scrub("g_" + key, pygame.Rect(x + 90, y, w - 90, 22),
+                                   getattr(self.project, key), step)
+                if ch:
+                    setattr(self.project, key, max(1, int(round(v))))
+                    self._thumbs_dirty = True
+                y += 26
+            for key, lbl in (("box_x", "Caja X"), ("box_y", "Caja Y")):
+                self.text(lbl, (x + 4, y + 4), TEXT, font=self.font_s)
+                v, ch = self.scrub("g_" + key, pygame.Rect(x + 90, y, w - 90, 22),
+                                   getattr(self.project, key), 0.5)
+                if ch:
+                    setattr(self.project, key, v)
+                    self._thumbs_dirty = True
+                y += 26
+
+        self._right_content_h = y - y0 + 8
+        self.screen.set_clip(None)
+
+        # barra de scroll
+        if max_scroll > 0 and content_h > 0:
+            track_h = p.h - 8
+            kh = max(24, int(track_h * (p.h - 14) / content_h))
+            ky = p.y + 4 + int((track_h - kh) * (self._right_scroll / max_scroll))
+            pygame.draw.rect(self.screen, PANEL2,
+                             pygame.Rect(p.right - 7, p.y + 4, 4, track_h),
+                             border_radius=2)
+            pygame.draw.rect(self.screen, ACCENT,
+                             pygame.Rect(p.right - 7, ky, 4, kh), border_radius=2)
+
+    def _fold_header(self, x, w, y, p, key, title):
+        """Cabecera plegable (click = recoger/desplegar). Devuelve (abierto, y)."""
+        folded = self._fold.get(key, False)
+        hdr = pygame.Rect(p.x + 4, y - 2, p.w - 14, 19)
+        hot = hdr.collidepoint(self.mouse)
+        pygame.draw.rect(self.screen, HOVER if hot else PANEL2, hdr, border_radius=3)
+        cx, cy = x + 4, y + 7
+        if folded:
+            pts = [(cx - 2, cy - 4), (cx + 4, cy), (cx - 2, cy + 4)]
         else:
-            self.text("(nada seleccionado)", (x, y), DIM, font=self.font_s)
-            y += 30
+            pts = [(cx - 4, cy - 2), (cx + 4, cy - 2), (cx, cy + 4)]
+        pygame.draw.polygon(self.screen, ACCENT, pts)
+        self.text(title, (x + 16, y), ACCENT, font=self.font_b)
+        if self.lmb_down and hot:
+            self._fold[key] = not folded
+            self.lmb_down = False           # no atravesar al contenido
+        return (not self._fold.get(key, False)), y + 22
 
-        pygame.draw.line(self.screen, LINE, (p.x + 6, y), (p.right - 6, y))
-        y += 8
-        self.text("TILE / PROYECTO", (x, y), ACCENT, font=self.font_s)
-        y += 20
-        for key, lbl, step in (("tile_w", "Tile ancho", 0.25),
-                               ("tile_h", "Tile alto", 0.25)):
-            self.text(lbl, (x + 4, y + 4), TEXT, font=self.font_s)
-            v, ch = self.scrub("g_" + key, pygame.Rect(x + 90, y, w - 90, 22),
-                               getattr(self.project, key), step)
-            if ch:
-                setattr(self.project, key, max(1, int(round(v))))
-                self._thumbs_dirty = True
-            y += 26
-        for key, lbl in (("box_x", "Caja X"), ("box_y", "Caja Y")):
-            self.text(lbl, (x + 4, y + 4), TEXT, font=self.font_s)
-            v, ch = self.scrub("g_" + key, pygame.Rect(x + 90, y, w - 90, 22),
-                               getattr(self.project, key), 0.5)
-            if ch:
-                setattr(self.project, key, v)
-                self._thumbs_dirty = True
-            y += 26
+    def _divider(self, p, y):
+        pygame.draw.line(self.screen, LINE, (p.x + 6, y), (p.right - 10, y))
+        return y + 8
 
     def _name_header(self, x, w, y, p, kind, idx, name):
         editing = (self.editing is not None and self.editing[1] == idx
@@ -3165,6 +3577,21 @@ class App:
             self.text("Libre: no sigue ningun hueso.", (x, y), SELECT,
                       font=self.font_s)
             y += 18
+        # conexion (socket): este material se PEGA por su centro a ese punto del
+        # cuerpo -> el juego lo ubica solo, sin importar su tamano.
+        self.text("Conexion (pegar a)", (x, y + 4), DIM, font=self.font_s)
+        if self.button(pygame.Rect(x + 120, y, 22, 22), "<"):
+            self.cycle_connection(idx, -1)
+        cname = model.SOCKET_LABELS.get(sp.connection, "(ninguna)")
+        self.text(cname, (x + 4, y + 26),
+                  ACCENT if sp.connection else DIM, font=self.font_s)
+        if self.button(pygame.Rect(p.right - 32, y, 22, 22), ">"):
+            self.cycle_connection(idx, 1)
+        y += 44
+        if sp.connection:
+            self.text("Su centro se pega al punto del cuerpo.",
+                      (x + 4, y), DIM, font=self.font_s)
+            y += 16
         # transform o offset
         if sp.bone:
             self.text("OFFSET respecto al hueso", (x, y), ACCENT, font=self.font_s)
@@ -3201,6 +3628,103 @@ class App:
         getattr(sp, which)[key] = v
         self.dirty = True
         self._thumbs_dirty = True
+
+    # icono por socket (vectorial, ver _draw_icon)
+    _SOCKET_ICON = {
+        "mano_izq": "hand_l", "mano_der": "hand_r", "ojos": "eyes",
+        "pelo": "hair", "nariz": "nose", "boca": "mouth",
+        "pierna_izq": "pants", "pierna_der": "pants",
+        "zapato_izq": "shoes", "zapato_der": "shoes",
+    }
+
+    def _draw_sockets(self, x, w, y, p):
+        """Botones de PUNTOS DE CONEXION (cuerpo). Crean/seleccionan un anchor con
+        nombre reservado (ojos, pelo, mano...) que sigue el rig por frame; los
+        materiales se pegan por su centro a esos puntos en el juego."""
+        self.text("Piezas que el juego pega por su centro", (x, y), DIM,
+                  font=self.font_s)
+        y += 16
+        self.text("(ropa que se deforma: 'Sigue al hueso')", (x, y), DIM,
+                  font=self.font_s)
+        y += 18
+        existing = {b.name for b in self.project.bones
+                    if getattr(b, "anchor", False)}
+        bw = (w - 6) // 2
+        bh = 28
+        for i, sid in enumerate(model.SOCKETS):
+            col = i % 2
+            row = i // 2
+            r = pygame.Rect(x + col * (bw + 6), y + row * (bh + 4), bw, bh)
+            has = sid in existing
+            lbl = model.SOCKET_LABELS.get(sid, sid)
+            if self._socket_button(r, self._SOCKET_ICON.get(sid, "hand"),
+                                   lbl, active=has):
+                self.create_socket(sid)
+        rows = (len(model.SOCKETS) + 1) // 2
+        y += rows * (bh + 4) + 4
+        self.text("Verde = colocado. Click crea/selecciona.",
+                  (x + 2, y), DIM, font=self.font_s)
+        return y + 16
+
+    def _draw_assign(self, x, w, y, p):
+        """Asistente: vincula tu arte a los huesos de la plantilla. Cada sprite es
+        una fila; al seleccionarlo usa 'Sigue al hueso' (arriba) para elegir hueso."""
+        self.text("Vincula tu arte al rig de la plantilla", (x, y), DIM,
+                  font=self.font_s)
+        y += 18
+        if not self.project.bones:
+            self.text("Carga una plantilla (toolbar).", (x, y), SELECT,
+                      font=self.font_s)
+            return y + 18
+        if self.button(pygame.Rect(x, y, w, 24), "Auto por cercania (todos)"):
+            self.auto_assign_bones()
+        y += 28
+        if self.button(pygame.Rect(x, y, w, 22),
+                       "Generar anims borrador (opcional)"):
+            self.generate_draft_anims()
+        y += 24
+        self.text("agacharse/sentado/atacar/cortar (aproximadas)",
+                  (x + 2, y), DIM, font=self.font_s)
+        y += 18
+        if not self.project.sprites:
+            self.text("Importa tu dibujo para asignarlo.", (x, y), DIM,
+                      font=self.font_s)
+            return y + 18
+        for i, sp in enumerate(self.project.sprites):
+            r = pygame.Rect(x, y, w, 22)
+            sel = (self.sel_kind == "sprite" and self.sel_idx == i)
+            ok = bool(sp.bone)
+            hot = r.collidepoint(self.mouse)
+            col = ACTIVE if sel else (HOVER if hot else PANEL2)
+            pygame.draw.rect(self.screen, col, r, border_radius=3)
+            pygame.draw.rect(self.screen, (120, 210, 150) if ok else LINE, r, 1,
+                             border_radius=3)
+            nm = sp.name if len(sp.name) <= 16 else sp.name[:15] + "…"
+            self.text(nm, (r.x + 6, r.y + 4), TEXT, font=self.font_s)
+            self.text(sp.bone or "— sin hueso", (r.right - 6, r.centery),
+                      (150, 220, 170) if ok else SELECT, font=self.font_s,
+                      right=True)
+            if self.lmb_down and hot:
+                self.sel_kind, self.sel_idx = "sprite", i
+            y += 24
+        self.text("Selecciona un sprite y usa 'Sigue al hueso' arriba.",
+                  (x + 2, y), DIM, font=self.font_s)
+        return y + 16
+
+    def _socket_button(self, rect, icon, label, active=False):
+        """Boton con icono grande + etiqueta; resalta en verde si ya existe."""
+        hot = rect.collidepoint(self.mouse)
+        if active:
+            col, ring = (46, 92, 64), (120, 210, 150)
+        else:
+            col, ring = (HOVER if hot else PANEL2), LINE
+        pygame.draw.rect(self.screen, col, rect, border_radius=5)
+        pygame.draw.rect(self.screen, ring, rect, 1, border_radius=5)
+        ico = pygame.Rect(rect.x + 3, rect.y + 3, rect.h - 6, rect.h - 6)
+        self._draw_icon(icon, ico, (170, 230, 190) if active else SELECT)
+        self.text(label, (rect.x + rect.h + 1, rect.centery - 7),
+                  TEXT, font=self.font_s)
+        return self.lmb_down and hot
 
     def _props_bone(self, x, w, y, p):
         idx = self.sel_idx
