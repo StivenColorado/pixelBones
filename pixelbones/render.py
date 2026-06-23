@@ -97,12 +97,19 @@ def blit_rotate(dest, image, screen_pos, pivot, angle_deg, scale=1.0):
 def draw_sprites(dest, project, frame, world_to_screen, zoom=1.0,
                  only_visible=True, sprites_filter=None):
     pose_for = model.pose_for_frame(project, frame)
+    # la visibilidad por frame es LIBRE: la decide frame.hidden (lo que el usuario
+    # eligio mostrar en ESE frame). El frame de reposo codifica el visible global.
+    hidden = getattr(frame, "hidden", None)
     for idx in project.sprite_draw_order():
         if sprites_filter is not None and idx not in sprites_filter:
             continue
         sp = project.sprites[idx]
-        if (only_visible and not sp.visible) or sp.surface is None:
+        if sp.surface is None:
             continue
+        if hidden and sp.name in hidden:         # oculto en ESTE frame
+            continue
+        if hidden is None and only_visible and not sp.visible:
+            continue                              # sin frame: visible global
         wx, wy, wrot, wscale = model.sprite_world(project, sp, pose_for)
         sx, sy = world_to_screen(wx, wy)
         blit_rotate(dest, sp.surface, (sx, sy), sp.pivot, wrot,

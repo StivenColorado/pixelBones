@@ -5,7 +5,512 @@
   "box_x": -32.0,
   "box_y": -120.0,
   "fps": 8,
-  "sprites": [],
+  "sprites": [
+    {
+      "name": "capa 13",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.7",
+      "local": {
+        "x": -20.335820093868136,
+        "y": 11.369834232791986,
+        "rot": -76.6754687381092,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 0,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt0sEJgDAQRNGtR282JVZgR2IFtqfkEBQRG5j3YMn5D6kCAAAAAAAAAAAAAAAAAAAAAAAAAODPsU5nuwpuT9zg3Z62gf7v/pQN9N+t7d3mIar/qTXvyxjZn/r/u+T+5PYuuR0AAAAAAAAAgIp3AebEjb4="
+        }
+      ],
+      "active_layer": 0,
+      "origin": "bd0a5c103b94"
+    },
+    {
+      "name": "capa 13 copia",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.3",
+      "local": {
+        "x": -18.75173646156446,
+        "y": -17.680127322774297,
+        "rot": -93.301865674435,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 14,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt1s8qhFEYwOHvEixspEQUxp+M27CwkZqIMkmSFGnK2sJqFpOFrKRJkiw0ub2jd8pXM1cweZ+nzuIsf+f9TuerKgAAAAAAAAAAAAAAAAAAAAAAAAAAYFJ8Xm6Un852vapE7vdmSrc1N9Kf6Qwe9mfL09Fi3d0/XU1zBtc7U+W1vTIy9ziPr6vNFP13u9Nl/O5/XKyXl5PlFP1vZ43yfbNVt8c+0x14P18bzj9mHq2x/2vO0B/dsZ6Pl4atj4cL/755XHzzvYP5lG9fiPkPbptp+6M9c3/I+u8HAAAAAAAAAFQT6xeo+ast"
+        }
+      ],
+      "active_layer": 0,
+      "origin": "9529f367599d"
+    },
+    {
+      "name": "capa 7 copia copia",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.14",
+      "local": {
+        "x": 16.5521881735272,
+        "y": -57.77428356472853,
+        "rot": 1.301952672578878,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 2,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt07ENgEAMA0DPRMNsNL8XFaOB6F4UCBBV/k7yAHaUBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/rW1eb8mg/e/Swo5+6zL9DjVdnjbv9oOX/v3G2Sw/69ye0gRB7s6xAQ="
+        }
+      ],
+      "active_layer": 0,
+      "origin": "c92ef9397825"
+    },
+    {
+      "name": "capa 7 copia",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.19",
+      "local": {
+        "x": -2.3178865286979544,
+        "y": -58.604170707829596,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 3,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt07ENgEAMA0DPRMNsNOxFxWiP6BAFAhpQ/k7yAHaUBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/mmdx3ZOOu9/lRSy91mm4Xaq7fC0f7Ud3vY/bpDO/r/K7SEf2wCXKcQE"
+        }
+      ],
+      "active_layer": 0,
+      "origin": "9b14e65a6d3a"
+    },
+    {
+      "name": "capa 7",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.17",
+      "local": {
+        "x": -23.017497522983128,
+        "y": 17.61673462286296,
+        "rot": -108.1130658075233,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 4,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2MtKw1AQgOHzNrqwauvtfXSnqHgXEZ9FXKqoeEVEfLTKFFJKTLsVznwfhJbs/swkpC0FAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAx+rjaGXUdJ3J6hv937fjYYHVmuQVd7xv7J9vY1KMlmH8fD/mKa/q7ZPx0spe5/PloefpyuVNs/a/eb/c/c/7hX9/7fbfdm7v7n+Wq17SHm+3Y8mPrs+75cr7o/2mPGXf23OwtV737T/3Wx9qf99aQ/Ol97/8thf7TjXc/9Zvdr7o/djznHs25y9pnee+IaRHPXcy9D//1ubzz/2Pv4nuHen3zvud6cG+999NfeHtrvfdEenxlm3+6PmTf3QIZ7v91/szU/7s/Q3u7P9p/ntObmfKncrP5Sua7fOpNHqVzm9qA/b3vI3h+ydgNA+Ue/Lpp85Q=="
+        }
+      ],
+      "active_layer": 0,
+      "origin": "14a88ec3e382"
+    },
+    {
+      "name": "capa 7 copia.1",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.12",
+      "local": {
+        "x": -28.048632443294025,
+        "y": 4.585882150714237,
+        "rot": -107.95616515262674,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 5,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt1zEOgzAQRcE9Ew1HS5dj0XK0RI6EhCxDavxnJDd0z2sjqAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAnmJ/r5/RquD2hP6+d3stv5WyB6P2xP5ze78HFTb7tP5Ru/65+/+d/fT+2d//ybNv9OtPvfuNft99o36zn7//6Ew8++fO5Nnrv+6vSfWd/czT+pPa7/rbswpw9a+T0J/cfkhub1K7AaAe6gsVgmq+"
+        }
+      ],
+      "active_layer": 0,
+      "origin": "0c1516ccd861"
+    },
+    {
+      "name": "capa 11",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.11",
+      "local": {
+        "x": -3.7016657116200045,
+        "y": -8.32681881773211,
+        "rot": -81.6341138759674,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 8,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt1ktKA0EUheFag2tw4Fvjg2zFmQMRERFR8YEDF+JQREREREURBy6t5DScptMG1JFw7//BJUmTQf5KdSWlAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALGsDyfq6+lyOyV5v+fzYlgz9atXM24t9J6SoH9ce/Z+Xdd7oq6B+x/2F+rjwWK9252rT0dLI/2R94C6ng8HTbf6NS/Hg1T972erbbtatRZeg0z9atZcbU59uwci97+drLT3/e3ObL3cmGxea6KfgWr6OF9ruu/35pt9oOdq15kY/R5Qk/rU7X493mzPjHz/0fvV5zPQe0FroNfZ+q+3ppuzQOeg9kCWfjWr3+egJ/JvgPv7e8Cj+0C/iVn69d3r3Ne+d7uuZen3Gni8BzL1d8f/iSP3/7QGPvsj9ku3v78Gvpapvz9uz9SfZe//5h6I+t/vL+dg9H7p9v/3ZwEAAAAAAAAAAAAAAABKMF+5SVVb"
+        }
+      ],
+      "active_layer": 0,
+      "origin": "f67dbccbaf71"
+    },
+    {
+      "name": "capa 11 copia",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.16",
+      "local": {
+        "x": -6.731893204016295,
+        "y": 5.141657371380464,
+        "rot": -80.4399035191137,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 7,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2MdKBEEQxvG5KuaHMG923cdQzFcVERNmBQ8+ioiIiAmzBw8+Wss3UDK6wXv1/wfFzvXrqu6e2SQBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkPV+XA5WC7W+kETCMn+d1tKy/F7XQLmyvbbMjdYgcZ4/m/3vGnjPn+211cN2Pi3L73EN5qo9TXt/t5VLy/MemCp1pD3+OKrU5X/cLaTlPf/V6nB42SvV5c/Ov9f80+XOcLE8GN4Oyk37b/vDY/6ZSleav1H/Y8g/P96bzv/TTrHp/HvOr0yXK0PhfjMfZX6ZLLSH2/VceN4v/jv/Xs9A5ddd3yq/1ztA70CagfOlgV9roHm42RiNYg/MjnWnM3C22B+u10Z+9oLORpX3/MqlOdBdaGug2devynt+UTbNu/qtfaBnK3sP9noGinJpH1herYH13/t3kFE2y65zz/qv58+TahT5VZZdv7YX7C70nF+UT+e/ctsZqDPh9bAURX5RRn0bKL96b/dBTP8J251oM6B1SCKkOZjIt0WZHQAAAAAAAAAAAAAAAEDS0jfgTCeI"
+        }
+      ],
+      "active_layer": 0,
+      "origin": "a2e7a4fe0069"
+    },
+    {
+      "name": "capa 3",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.5",
+      "local": {
+        "x": 26.90810505218535,
+        "y": 16.731369085816965,
+        "rot": -88.8876003837022,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 8,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2LsNgzAYhdF/hoyShlWyCV3Gos1oRC6MEA+lS+F7juSC8rOR/KgCAAAAAAAAAID/ek2P9W7U4Hrn5z2ty/zcRvtOmIPW13v3/fs5qIH1tU/vP7br168/o7/vAYn9jX79+vUn91/tgQn3n1/9FUC/fv369etP7b86A6b0N/rP/0BS//EtPOXuAwAAAAAAAAAAAAAAAAAAAEAN5QuE+ryJ"
+        }
+      ],
+      "active_layer": 0,
+      "origin": "60f915aeb0cb"
+    },
+    {
+      "name": "capa 3 copia",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.1",
+      "local": {
+        "x": 28.743502592107333,
+        "y": -17.68008862048458,
+        "rot": -88.09084756700362,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 13,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2clOFUEYhuFeggwSFq4JCDJ4RiBcgHuQQUJCEEWEiMokqGHBRbgwxhgDBNSAMohDCAsv7SdfmSYdDrJyVf/7JJWzfqureqiTJAAAAAAAAAAAAAAAAPBkrK/R0pE4ot6R7nq7W7hme3O58Dva2+BmDobLdbYz3WkfH7bZ1qN225i6FebgXs9183DtB/LVoX9/IW+/XpXtcKlg24877Hi5FP1eUN/nma4w1J4OzcHRYjHsiyTyfu15rftsv8a3Z/mwNpLI+7XOd5/erujXvPTnqqLv//2y+3zvp+PHaskO5gs2WKyJvv/Pel/FtVf/yeue6J+D/+rX+LlSdnH/v6z/+4uibU61R98varzYrueB5sVj/5cnf98FPPXfaU4q9oCn/q/Pc/ZptjOsfY/96n0z3hTWfjoH3vo1PjxoDd9/3vovewbST7+H/qFSbfgG9Nyvbz2d+by73+KuX42na73hvr8+eMNdv6hVz31df2/P/+w7gM6B3k/edNuvc8+3E83h/MNjv4a+A3Qv9NKefQfQ0H8BGp76s2tAZx/6Lyj2s++r9oDWv7d+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAACQ/HdnEwHgwg=="
+        }
+      ],
+      "active_layer": 0,
+      "origin": "ceebf251424a"
+    },
+    {
+      "name": "capa 4 copia",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.6",
+      "local": {
+        "x": 3.284955912673781,
+        "y": 16.081935657679956,
+        "rot": -92.48955292199916,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 6,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt1rENgCAQhlFmcBQbVnETO8eydTTNFTRGKsv/veQG+C5AaA0AAAAAAAAAAAAAAAAAAIC/zn29x7Tg9pqtLzE7qNZ3f8oOZu369SfsQL9+/fr15/ZfR4/tL/5A+lPbi/7vN1B/Rv/sDqT11xkYk9QOAAAAAAAAAAAAANACPYPSWaA="
+        }
+      ],
+      "active_layer": 0,
+      "origin": "3235826a9c32"
+    },
+    {
+      "name": "capa 4",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.2",
+      "local": {
+        "x": 0.41109318963537966,
+        "y": -17.981749555769312,
+        "rot": -91.34788728019862,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 14,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2NsqRFEYwPF9p6TESzgN45R5CiUlrkmShJzuPIskSRJyuPRoS9+uPe0yrqXv96vvAf5rrb1mNVUFAAAAAAAAAAAAAAAAAADAf/VyPF++rnr1VMmsdobK9fZE+bhcrGerN15PlcDG8mi53Z0qDwedfn+zBlUC6wsj5W5vuryezv/oz7AGa93hur/dnuUMRN/9/ky52ZkszyfdlP1x7mMNHg9nU/ZH59PRXD1Z++MMRP+gO7BK0P/bGcjQ33Rn7Y93T0zW/rj3Y7L2v58t1v2D7sAM/Z8XS/19jzdQ+x2Uaf8H/QZk2//mLsjSHzZXxsrb+UL/HdR8/xnaQ3TGfz7Z3r5t2fvb7+Bs7e1voJls/QAAAAAAAAAAAABA9We+AXNqbpw="
+        }
+      ],
+      "active_layer": 0,
+      "origin": "979225ddfa12"
+    },
+    {
+      "name": "capa 2",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "raiz",
+      "local": {
+        "x": 3.9537494076843673,
+        "y": 0.4954961441742814,
+        "rot": 91.17714488598206,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 12,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJztmkuL1EAURusP+N65UVTw/ep5/QpXjk9U8IGIiIiIIyLuXMssRFyJiIiIiIiKiPjTSr7AN1ya9CQ9MzCp5By4pHuSQE7dSlXd6kkJAAAAAAAAAAAAAAAAAACm5d/zhTwp0gD49XgmD7kNvj04NVj/T3eOZcVq/n1ug3c3DuXXV/dnHb/cO5F/P5ldcdbnz3ePZ/WPVDAXF3bmGBfmd+TFma2Vl5zlv3x5b35z7UD+cOtI1nggdx3l73ZRnJvdls/Pba+OZ0dbqmPqOMrl1/sn88fbR/P3h6fzj0ejKv48natC5xRy1bugc/aNIVcd/z6bX+kjbtPUQfRcfs46f+U3toWuk5tC390Pou+k6GIbRP+6kKPc9R7oaG/n223SJkr0j+Oc+oXz3Tbnpfs71zHn03qX6i/P9TqX7r8R3qX6t4k268K++uu90JwwRH/NA9PMfX30j3XA0Py13h9y/l9e2lP5qx4Yor/Ww017IjHUTn3x9z6A1sNtrle9XEL+Xe8pr6oF9VmecY5zPaRz2g9QG+haXadQnvU93vP+5uHO+mufQms8PaPHdD2/a2DVw/JSznVOudR3+WgvpM046Xmiy/l3Xl3TK7fOs2N8vdNm/nt7/WBn3cf7v3ItJ/V/7225/qlza5r/4vhYiv+kdV3sB+4DTbVRnBtL8Hf/1/tfl3Pvg3k/QO/I+HX6e9280FV/E/OsMUt9IdZ43v9w/4j9xOfUbnVrgq67RzyuvVjcvaZ1UZ27jqkQlNdXV/Y1enmN0MY/FUQcB1bzUh9ZOrOrd/5e99WNYR4T4m8/jkntVZp/HAe9bneoTRR2Ha/9xu8pzd0oz17TN70Dfer7xnNaU33ruTL+LuK5sHT/uvy6rvPvYU3/E1K6/0bM/alAhu7/c2mUFUP3X2s7+L5UOOvxTz1iWv/Nfl4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAtEn8B/EOn60="
+        }
+      ],
+      "active_layer": 0,
+      "origin": "d7366e944bd4"
+    },
+    {
+      "name": "cabeza",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 18.0,
+        "y": -56.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": "hueso.9",
+      "local": {
+        "x": -33.0621446206,
+        "y": 2.0615906403509445,
+        "rot": 90.0,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 13,
+      "visible": true,
+      "layers": [
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2MtKHEEUxvF+htlmY4wm8Z6ZROZNJGC8IyISQu6ShWvXEkIQCUFCEBERr4iLPFqFr+A0NU3PLUMWp/3/oOhhuh38TlVXVXeWAQDw/7xs1kIvLasYy/Vnp9nSrj832raq1EE5lKcsb7d6eK9Bmr0s3+XHejh7O5O3i3f1cPPpecu1XmtQlv14azL8Wh+Lx7QdbU6Ew7Wn4WB5NPzeGA+32y/C3ZfZvAaZ8/wnr6divm8Lw2F37kE8KrO+V7+rBj9Xn4S9+aFYg3QseBwDxb5Xzv2lkZhbGdV+rDyOfa3sOn/6ZjrWQHVSfp1TDWzsZM7nPOVRbtXg++KjeFRe3Q86p/Fgn+2eUE3sNzyNAVvr0rlO2b6+ehj7PR37avps+XW078/fP8vr6D2/Mqp1WvPbNY/5/yVnVfZD5K/l9/Cgue13vOW3vc0g2TX/2TzpLb/mcbVecpbNjcqu9c/WAG/59b/bOmcZyvrX9r66zp4H9Ldpdo/5tWbZ2q6jsqXZlU97Ha351vdp/mLNPOYvzmHF/Jof2o0Nz+t/sQbKWDYGus19Xsd/+s6nXZ5ua57NGx73/2U1UN/30v+6LzQnXH1ouM7e6VmgW34999r7D8/Z+61B+i6wau+C0/e/Zbl1TTreq5S9H/c1NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAyFz7Cy/VFg4="
+        }
+      ],
+      "active_layer": 0,
+      "origin": "a028a92bf34d"
+    }
+  ],
   "bones": [
     {
       "name": "raiz",
@@ -5684,5 +6189,160 @@
       "box_y": -120
     }
   ],
-  "drawings": []
+  "drawings": [
+    {
+      "name": "dibujo",
+      "image_path": null,
+      "pivot": [
+        32.0,
+        64.0
+      ],
+      "transform": {
+        "x": 0.0,
+        "y": 0.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "bone": null,
+      "local": {
+        "x": 0.0,
+        "y": 0.0,
+        "rot": 0.0,
+        "scale": 1.0
+      },
+      "connection": null,
+      "z": 0,
+      "visible": true,
+      "layers": [
+        {
+          "name": "capa 13",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "bd0a5c103b94",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt0sEJgDAQRNGtR282JVZgR2IFtqfkEBQRG5j3YMn5D6kCAAAAAAAAAAAAAAAAAAAAAAAAAODPsU5nuwpuT9zg3Z62gf7v/pQN9N+t7d3mIar/qTXvyxjZn/r/u+T+5PYuuR0AAAAAAAAAgIp3AebEjb4="
+        },
+        {
+          "name": "capa 13 copia",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "9529f367599d",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt1s8qhFEYwOHvEixspEQUxp+M27CwkZqIMkmSFGnK2sJqFpOFrKRJkiw0ub2jd8pXM1cweZ+nzuIsf+f9TuerKgAAAAAAAAAAAAAAAAAAAAAAAAAAYFJ8Xm6Un852vapE7vdmSrc1N9Kf6Qwe9mfL09Fi3d0/XU1zBtc7U+W1vTIy9ziPr6vNFP13u9Nl/O5/XKyXl5PlFP1vZ43yfbNVt8c+0x14P18bzj9mHq2x/2vO0B/dsZ6Pl4atj4cL/755XHzzvYP5lG9fiPkPbptp+6M9c3/I+u8HAAAAAAAAAFQT6xeo+ast"
+        },
+        {
+          "name": "capa 7 copia copia",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "c92ef9397825",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt07ENgEAMA0DPRMNsNL8XFaOB6F4UCBBV/k7yAHaUBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/rW1eb8mg/e/Swo5+6zL9DjVdnjbv9oOX/v3G2Sw/69ye0gRB7s6xAQ="
+        },
+        {
+          "name": "capa 7 copia",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "9b14e65a6d3a",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt07ENgEAMA0DPRMNsNOxFxWiP6BAFAhpQ/k7yAHaUBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/mmdx3ZOOu9/lRSy91mm4Xaq7fC0f7Ud3vY/bpDO/r/K7SEf2wCXKcQE"
+        },
+        {
+          "name": "capa 7",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "14a88ec3e382",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2MtKw1AQgOHzNrqwauvtfXSnqHgXEZ9FXKqoeEVEfLTKFFJKTLsVznwfhJbs/swkpC0FAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAx+rjaGXUdJ3J6hv937fjYYHVmuQVd7xv7J9vY1KMlmH8fD/mKa/q7ZPx0spe5/PloefpyuVNs/a/eb/c/c/7hX9/7fbfdm7v7n+Wq17SHm+3Y8mPrs+75cr7o/2mPGXf23OwtV737T/3Wx9qf99aQ/Ol97/8thf7TjXc/9Zvdr7o/djznHs25y9pnee+IaRHPXcy9D//1ubzz/2Pv4nuHen3zvud6cG+999NfeHtrvfdEenxlm3+6PmTf3QIZ7v91/szU/7s/Q3u7P9p/ntObmfKncrP5Sua7fOpNHqVzm9qA/b3vI3h+ydgNA+Ue/Lpp85Q=="
+        },
+        {
+          "name": "capa 7 copia",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "0c1516ccd861",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt1zEOgzAQRcE9Ew1HS5dj0XK0RI6EhCxDavxnJDd0z2sjqAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAnmJ/r5/RquD2hP6+d3stv5WyB6P2xP5ze78HFTb7tP5Ru/65+/+d/fT+2d//ybNv9OtPvfuNft99o36zn7//6Ew8++fO5Nnrv+6vSfWd/czT+pPa7/rbswpw9a+T0J/cfkhub1K7AaAe6gsVgmq+"
+        },
+        {
+          "name": "capa 11",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "f67dbccbaf71",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt1ktKA0EUheFag2tw4Fvjg2zFmQMRERFR8YEDF+JQREREREURBy6t5DScptMG1JFw7//BJUmTQf5KdSWlAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALGsDyfq6+lyOyV5v+fzYlgz9atXM24t9J6SoH9ce/Z+Xdd7oq6B+x/2F+rjwWK9252rT0dLI/2R94C6ng8HTbf6NS/Hg1T972erbbtatRZeg0z9atZcbU59uwci97+drLT3/e3ObL3cmGxea6KfgWr6OF9ruu/35pt9oOdq15kY/R5Qk/rU7X493mzPjHz/0fvV5zPQe0FroNfZ+q+3ppuzQOeg9kCWfjWr3+egJ/JvgPv7e8Cj+0C/iVn69d3r3Ne+d7uuZen3Gni8BzL1d8f/iSP3/7QGPvsj9ku3v78Gvpapvz9uz9SfZe//5h6I+t/vL+dg9H7p9v/3ZwEAAAAAAAAAAAAAAABKMF+5SVVb"
+        },
+        {
+          "name": "capa 11 copia",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "a2e7a4fe0069",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2MdKBEEQxvG5KuaHMG923cdQzFcVERNmBQ8+ioiIiAmzBw8+Wss3UDK6wXv1/wfFzvXrqu6e2SQBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAkPV+XA5WC7W+kETCMn+d1tKy/F7XQLmyvbbMjdYgcZ4/m/3vGnjPn+211cN2Pi3L73EN5qo9TXt/t5VLy/MemCp1pD3+OKrU5X/cLaTlPf/V6nB42SvV5c/Ov9f80+XOcLE8GN4Oyk37b/vDY/6ZSleav1H/Y8g/P96bzv/TTrHp/HvOr0yXK0PhfjMfZX6ZLLSH2/VceN4v/jv/Xs9A5ddd3yq/1ztA70CagfOlgV9roHm42RiNYg/MjnWnM3C22B+u10Z+9oLORpX3/MqlOdBdaGug2devynt+UTbNu/qtfaBnK3sP9noGinJpH1herYH13/t3kFE2y65zz/qv58+TahT5VZZdv7YX7C70nF+UT+e/ctsZqDPh9bAURX5RRn0bKL96b/dBTP8J251oM6B1SCKkOZjIt0WZHQAAAAAAAAAAAAAAAEDS0jfgTCeI"
+        },
+        {
+          "name": "capa 3",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "60f915aeb0cb",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2LsNgzAYhdF/hoyShlWyCV3Gos1oRC6MEA+lS+F7juSC8rOR/KgCAAAAAAAAAID/ek2P9W7U4Hrn5z2ty/zcRvtOmIPW13v3/fs5qIH1tU/vP7br168/o7/vAYn9jX79+vUn91/tgQn3n1/9FUC/fv369etP7b86A6b0N/rP/0BS//EtPOXuAwAAAAAAAAAAAAAAAAAAAEAN5QuE+ryJ"
+        },
+        {
+          "name": "capa 3 copia",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "ceebf251424a",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2clOFUEYhuFeggwSFq4JCDJ4RiBcgHuQQUJCEEWEiMokqGHBRbgwxhgDBNSAMohDCAsv7SdfmSYdDrJyVf/7JJWzfqureqiTJAAAAAAAAAAAAAAAAPBkrK/R0pE4ot6R7nq7W7hme3O58Dva2+BmDobLdbYz3WkfH7bZ1qN225i6FebgXs9183DtB/LVoX9/IW+/XpXtcKlg24877Hi5FP1eUN/nma4w1J4OzcHRYjHsiyTyfu15rftsv8a3Z/mwNpLI+7XOd5/erujXvPTnqqLv//2y+3zvp+PHaskO5gs2WKyJvv/Pel/FtVf/yeue6J+D/+rX+LlSdnH/v6z/+4uibU61R98varzYrueB5sVj/5cnf98FPPXfaU4q9oCn/q/Pc/ZptjOsfY/96n0z3hTWfjoH3vo1PjxoDd9/3vovewbST7+H/qFSbfgG9Nyvbz2d+by73+KuX42na73hvr8+eMNdv6hVz31df2/P/+w7gM6B3k/edNuvc8+3E83h/MNjv4a+A3Qv9NKefQfQ0H8BGp76s2tAZx/6Lyj2s++r9oDWv7d+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAACQ/HdnEwHgwg=="
+        },
+        {
+          "name": "capa 4 copia",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "3235826a9c32",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt1rENgCAQhlFmcBQbVnETO8eydTTNFTRGKsv/veQG+C5AaA0AAAAAAAAAAAAAAAAAAIC/zn29x7Tg9pqtLzE7qNZ3f8oOZu369SfsQL9+/fr15/ZfR4/tL/5A+lPbi/7vN1B/Rv/sDqT11xkYk9QOAAAAAAAAAAAAANACPYPSWaA="
+        },
+        {
+          "name": "capa 4",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "979225ddfa12",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2NsqRFEYwPF9p6TESzgN45R5CiUlrkmShJzuPIskSRJyuPRoS9+uPe0yrqXv96vvAf5rrb1mNVUFAAAAAAAAAAAAAAAAAADAf/VyPF++rnr1VMmsdobK9fZE+bhcrGerN15PlcDG8mi53Z0qDwedfn+zBlUC6wsj5W5vuryezv/oz7AGa93hur/dnuUMRN/9/ky52ZkszyfdlP1x7mMNHg9nU/ZH59PRXD1Z++MMRP+gO7BK0P/bGcjQ33Rn7Y93T0zW/rj3Y7L2v58t1v2D7sAM/Z8XS/19jzdQ+x2Uaf8H/QZk2//mLsjSHzZXxsrb+UL/HdR8/xnaQ3TGfz7Z3r5t2fvb7+Bs7e1voJls/QAAAAAAAAAAAABA9We+AXNqbpw="
+        },
+        {
+          "name": "capa 2",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "d7366e944bd4",
+          "w": 64,
+          "h": 128,
+          "pix": "eJztmkuL1EAURusP+N65UVTw/ep5/QpXjk9U8IGIiIiIIyLuXMssRFyJiIiIiIiKiPjTSr7AN1ya9CQ9MzCp5By4pHuSQE7dSlXd6kkJAAAAAAAAAAAAAAAAAACm5d/zhTwp0gD49XgmD7kNvj04NVj/T3eOZcVq/n1ug3c3DuXXV/dnHb/cO5F/P5ldcdbnz3ePZ/WPVDAXF3bmGBfmd+TFma2Vl5zlv3x5b35z7UD+cOtI1nggdx3l73ZRnJvdls/Pba+OZ0dbqmPqOMrl1/sn88fbR/P3h6fzj0ejKv48natC5xRy1bugc/aNIVcd/z6bX+kjbtPUQfRcfs46f+U3toWuk5tC390Pou+k6GIbRP+6kKPc9R7oaG/n223SJkr0j+Oc+oXz3Tbnpfs71zHn03qX6i/P9TqX7r8R3qX6t4k268K++uu90JwwRH/NA9PMfX30j3XA0Py13h9y/l9e2lP5qx4Yor/Ww017IjHUTn3x9z6A1sNtrle9XEL+Xe8pr6oF9VmecY5zPaRz2g9QG+haXadQnvU93vP+5uHO+mufQms8PaPHdD2/a2DVw/JSznVOudR3+WgvpM046Xmiy/l3Xl3TK7fOs2N8vdNm/nt7/WBn3cf7v3ItJ/V/7225/qlza5r/4vhYiv+kdV3sB+4DTbVRnBtL8Hf/1/tfl3Pvg3k/QO/I+HX6e9280FV/E/OsMUt9IdZ43v9w/4j9xOfUbnVrgq67RzyuvVjcvaZ1UZ27jqkQlNdXV/Y1enmN0MY/FUQcB1bzUh9ZOrOrd/5e99WNYR4T4m8/jkntVZp/HAe9bneoTRR2Ha/9xu8pzd0oz17TN70Dfer7xnNaU33ruTL+LuK5sHT/uvy6rvPvYU3/E1K6/0bM/alAhu7/c2mUFUP3X2s7+L5UOOvxTz1iWv/Nfl4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAtEn8B/EOn60="
+        },
+        {
+          "name": "base",
+          "visible": true,
+          "opacity": 1.0,
+          "lid": "a028a92bf34d",
+          "w": 64,
+          "h": 128,
+          "pix": "eJzt2MtKHEEUxvF+htlmY4wm8Z6ZROZNJGC8IyISQu6ShWvXEkIQCUFCEBERr4iLPFqFr+A0NU3PLUMWp/3/oOhhuh38TlVXVXeWAQDw/7xs1kIvLasYy/Vnp9nSrj832raq1EE5lKcsb7d6eK9Bmr0s3+XHejh7O5O3i3f1cPPpecu1XmtQlv14azL8Wh+Lx7QdbU6Ew7Wn4WB5NPzeGA+32y/C3ZfZvAaZ8/wnr6divm8Lw2F37kE8KrO+V7+rBj9Xn4S9+aFYg3QseBwDxb5Xzv2lkZhbGdV+rDyOfa3sOn/6ZjrWQHVSfp1TDWzsZM7nPOVRbtXg++KjeFRe3Q86p/Fgn+2eUE3sNzyNAVvr0rlO2b6+ehj7PR37avps+XW078/fP8vr6D2/Mqp1WvPbNY/5/yVnVfZD5K/l9/Cgue13vOW3vc0g2TX/2TzpLb/mcbVecpbNjcqu9c/WAG/59b/bOmcZyvrX9r66zp4H9Ldpdo/5tWbZ2q6jsqXZlU97Ha351vdp/mLNPOYvzmHF/Jof2o0Nz+t/sQbKWDYGus19Xsd/+s6nXZ5ua57NGx73/2U1UN/30v+6LzQnXH1ouM7e6VmgW34999r7D8/Z+61B+i6wau+C0/e/Zbl1TTreq5S9H/c1NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAyFz7Cy/VFg4="
+        }
+      ],
+      "active_layer": 4,
+      "origin": null
+    }
+  ]
 }

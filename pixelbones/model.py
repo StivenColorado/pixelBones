@@ -203,15 +203,20 @@ class Frame:
     def __init__(self, name="frame"):
         self.name = name
         self.poses = {}                    # bone_name -> pose
+        self.hidden = set()                # nombres de sprites OCULTOS en ESTE frame
 
     def to_dict(self):
-        return {"name": self.name,
-                "poses": {k: clone_pose(v) for k, v in self.poses.items()}}
+        d = {"name": self.name,
+             "poses": {k: clone_pose(v) for k, v in self.poses.items()}}
+        if self.hidden:
+            d["hidden"] = sorted(self.hidden)
+        return d
 
     @classmethod
     def from_dict(cls, d):
         f = cls(d.get("name", "frame"))
         f.poses = {k: clone_pose(v) for k, v in d.get("poses", {}).items()}
+        f.hidden = set(d.get("hidden", []))
         return f
 
 
@@ -271,6 +276,12 @@ class Project:
         self.box_y = -120.0
         self.fps = 8
         self.path = None
+        # tipo de proyecto: "body" (normal) | "ropa" | "caracteristica" (items).
+        # Los items REFERENCIAN un cuerpo estandar (ref_body) del que toman rig +
+        # animaciones (no se editan) y lo muestran de fondo (fantasma) como guia.
+        self.kind = "body"
+        self.ref_body = None       # ruta/sentinela "@standard" del body de guia
+        self.export_crop_h = None  # alto de exportacion recortado (caracteristica)
 
     # -- utilidades ----------------------------------------------------------
     def bone_by_name(self, name):
@@ -316,15 +327,21 @@ class Project:
 
     # -- IO ------------------------------------------------------------------
     def to_dict(self):
-        return {
+        d = {
             "version": 4,
             "tile_w": self.tile_w, "tile_h": self.tile_h,
             "box_x": self.box_x, "box_y": self.box_y, "fps": self.fps,
             "sprites": [s.to_dict() for s in self.sprites],
             "bones": [b.to_dict() for b in self.bones],
             "clips": [c.to_dict() for c in self.clips],
-            "drawings": [d.to_dict() for d in self.drawings],
+            "drawings": [s.to_dict() for s in self.drawings],
         }
+        if self.kind != "body":
+            d["kind"] = self.kind
+            d["ref_body"] = self.ref_body
+            if self.export_crop_h:
+                d["export_crop_h"] = self.export_crop_h
+        return d
 
     @classmethod
     def from_dict(cls, d, base_dir=None):
@@ -334,6 +351,9 @@ class Project:
         pr.box_x = d.get("box_x", -32.0)
         pr.box_y = d.get("box_y", -120.0)
         pr.fps = d.get("fps", 8)
+        pr.kind = d.get("kind", "body")
+        pr.ref_body = d.get("ref_body")
+        pr.export_crop_h = d.get("export_crop_h")
         if "sprites" in d or "bones" in d:
             pr.sprites = [Sprite.from_dict(s) for s in d.get("sprites", [])]
             pr.bones = [Bone.from_dict(b) for b in d.get("bones", [])]
@@ -350,12 +370,32 @@ class Project:
             pr._migrate_v1(d)
         if not pr.clips:
             pr.clips = [Clip("animacion")]
+        pr._normalize_anchors()
         if base_dir:
             for s in pr.sprites:
                 if s.image_path and not os.path.isabs(s.image_path):
                     s.image_path = os.path.normpath(
                         os.path.join(base_dir, s.image_path))
         return pr
+
+    def _normalize_anchors(self):
+        """Los anclas/sockets son un offset FIJO respecto a su hueso padre. Si el
+        proyecto trae poses por frame para ellos (formato viejo: el socket se
+        'configuro' en un frame y en los demas se descuadraba), adopta como
+        REPOSO la primera pose que aparezca y borra las del resto de frames, asi
+        el socket sigue estrictamente al hueso en TODAS las animaciones."""
+        anchors = {b.name for b in self.bones if getattr(b, "anchor", False)}
+        if not anchors:
+            return
+        first = {}
+        for c in self.clips:
+            for f in c.frames:
+                for nm in [k for k in f.poses if k in anchors]:
+                    first.setdefault(nm, clone_pose(f.poses[nm]))
+                    del f.poses[nm]
+        for b in self.bones:
+            if b.name in first:
+                b.rest = first[b.name]
 
     def _migrate_v1(self, d):
         """Convierte el formato v1 (parts = imagen+hueso) al v2."""
@@ -457,6 +497,11 @@ def world_to_image_point(wx, wy, wrot, wscale, pivot, point):
 def pose_for_frame(project, frame):
     def lookup(idx):
         b = project.bones[idx]
+        # Los ANCLAS/sockets (ojos, pelo, manos...) son un offset FIJO respecto a
+        # su hueso padre: nunca se animan por frame, asi siguen al hueso en TODAS
+        # las animaciones. Se ignora cualquier pose por frame y se usa el reposo.
+        if getattr(b, "anchor", False):
+            return b.rest
         if frame is not None and b.name in frame.poses:
             return frame.poses[b.name]
         return b.rest

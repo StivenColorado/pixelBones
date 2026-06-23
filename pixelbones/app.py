@@ -60,6 +60,7 @@ class App:
         self.font_s = pygame.font.SysFont("dejavusans,sans", 12)
 
         self.project = model.Project()
+        self.ref_project = None        # body de referencia (fantasma) de un item
         self.sel_kind = None          # "sprite" | "bone" | None
         self.sel_idx = -1
         self.cur_clip = 0             # animacion activa (project.clips)
@@ -251,7 +252,7 @@ class App:
         # ---- modo ANIMAR ----
         if key == pygame.K_v:
             self.tool, self.link_bone = "select", None
-        elif key == pygame.K_b:
+        elif key == pygame.K_b and self.project.kind != "ropa":
             self.tool, self.link_bone = "bone", None
         elif key == pygame.K_c:
             self.tool, self.link_bone = "link", None
@@ -450,6 +451,9 @@ class App:
                 return
             if idx in ("tile_w", "tile_h"):
                 setattr(self.project, idx, max(1, int(round(val))))
+            elif idx == "export_crop_h":
+                h = int(round(val))
+                self.project.export_crop_h = h if h > 0 else None
             else:
                 setattr(self.project, idx, val)
             self._thumbs_dirty = True
@@ -461,7 +465,13 @@ class App:
             if new == old:
                 return
             self.snapshot()
-            self.project.sprites[idx].name = self.project.unique_sprite_name(new)
+            new = self.project.unique_sprite_name(new)
+            self.project.sprites[idx].name = new
+            for c in self.project.clips:          # conserva los 'ocultos' por frame
+                for fr in c.frames:
+                    if old in fr.hidden:
+                        fr.hidden.discard(old)
+                        fr.hidden.add(new)
         elif kind == "rename_bone" and idx < len(self.project.bones):
             old = self.project.bones[idx].name
             if new == old:
@@ -607,13 +617,23 @@ class App:
 
     def pose_for(self):
         def lookup(idx):
-            name = self.project.bones[idx].name
-            return self.working.get(name, self.project.bones[idx].rest)
+            b = self.project.bones[idx]
+            if b.anchor:                     # anclas/sockets: offset fijo (reposo)
+                return b.rest
+            return self.working.get(b.name, b.rest)
         return lookup
+
+    def _current_hidden(self):
+        """Materiales NO mostrados ahora mismo: en un frame, los de ese frame;
+        en reposo, los que tienen visible global apagado."""
+        if self.cur_frame >= 0:
+            return set(self.frames[self.cur_frame].hidden)
+        return {s.name for s in self.project.sprites if not s.visible}
 
     def display_frame(self):
         f = model.Frame("__work__")
         f.poses = self.working
+        f.hidden = self._current_hidden()
         return f
 
     def active_frame(self):
@@ -624,20 +644,23 @@ class App:
     def sync_working(self):
         self.working = {}
         for b in self.project.bones:
-            if self.cur_frame >= 0:
+            # los anclas/sockets usan SIEMPRE su reposo (offset fijo al padre)
+            if b.anchor or self.cur_frame < 0:
+                self.working[b.name] = model.clone_pose(b.rest)
+            else:
                 fr = self.frames[self.cur_frame]
                 self.working[b.name] = model.clone_pose(fr.poses.get(b.name, b.rest))
-            else:
-                self.working[b.name] = model.clone_pose(b.rest)
 
     def _write_pose(self, bone_idx):
-        name = self.project.bones[bone_idx].name
-        pose = model.clone_pose(self.working[name])
-        if self.cur_frame >= 0:
-            self.frames[self.cur_frame].poses[name] = pose
-            self._thumbs_dirty = True
+        b = self.project.bones[bone_idx]
+        pose = model.clone_pose(self.working[b.name])
+        # un ancla/socket guarda su offset en REPOSO (vale para todas las anims);
+        # un hueso normal en el frame actual (o en reposo si no hay frame).
+        if b.anchor or self.cur_frame < 0:
+            b.rest = pose
         else:
-            self.project.bones[bone_idx].rest = pose
+            self.frames[self.cur_frame].poses[b.name] = pose
+            self._thumbs_dirty = True
         self.dirty = True
 
     def apply_global_scale(self, f, pivot):
@@ -724,6 +747,8 @@ class App:
     def _restore(self, d):
         self.project = model.Project.from_dict(d)
         render.ensure_surfaces(self.project)
+        if self.is_item:                  # re-injerta el rig del body referenciado
+            self._attach_ref_body()
         self.sel_kind, self.sel_idx = None, -1
         self.cur_clip = max(0, min(self.cur_clip, len(self.project.clips) - 1))
         self.cur_frame = min(self.cur_frame, len(self.frames) - 1)
@@ -1347,10 +1372,17 @@ class App:
     # frames
     # ====================================================================
     def capture_frame(self):
+        if self.project.kind == "ropa":
+            self.status = ("La ropa usa las animaciones del body; no se capturan "
+                           "frames (dibuja y enlaza, se hornea solo).")
+            return
         self.snapshot()
         f = model.Frame(f"f{len(self.frames)+1}")
         for b in self.project.bones:
+            if b.anchor:                 # los anclas no se animan (offset fijo)
+                continue
             f.poses[b.name] = model.clone_pose(self.working.get(b.name, b.rest))
+        f.hidden = self._current_hidden()    # guarda lo que se esta mostrando
         self.frames.append(f)
         # SELECCIONAR el frame recien creado: lo que el usuario pose a partir de
         # ahora edita ESTE frame real (no la pose 'en vivo'/reposo, que confundia
@@ -1366,6 +1398,8 @@ class App:
         self.sync_working()
 
     def delete_frame(self, i):
+        if self._anim_locked():
+            return
         if 0 <= i < len(self.frames):
             self.snapshot()
             del self.frames[i]
@@ -1374,11 +1408,14 @@ class App:
             self._thumbs_dirty = True
 
     def duplicate_frame(self, i):
+        if self._anim_locked():
+            return
         if 0 <= i < len(self.frames):
             self.snapshot()
             src = self.frames[i]
             f = model.Frame(src.name + "*")
             f.poses = {k: model.clone_pose(v) for k, v in src.poses.items()}
+            f.hidden = set(src.hidden)
             self.frames.insert(i + 1, f)
             self.cur_frame = i + 1
             self.sync_working()
@@ -1425,12 +1462,20 @@ class App:
             else:
                 self.working[b.name] = model.clone_pose(b.rest)
 
+    def _anim_locked(self):
+        if self.project.kind == "ropa":
+            self.status = "La ropa hereda las animaciones del body (no editables)."
+            return True
+        return False
+
     def add_clip(self, seed_idx=None):
         """Crea una animacion basada en un frame (sin reproceso):
         - si hay un frame seleccionado (o se indica seed_idx), parte de ese;
         - si no, parte del PRIMER frame de la animacion actual;
         - si no hay frames, parte del reposo.
         Ese frame se siembra como el primero de la nueva animacion."""
+        if self._anim_locked():
+            return
         src = self.frames
         if seed_idx is None:
             seed_idx = self.cur_frame if self.cur_frame >= 0 else (0 if src else None)
@@ -1440,6 +1485,7 @@ class App:
         if base is not None:
             f = model.Frame("f1")
             f.poses = {k: model.clone_pose(v) for k, v in base.poses.items()}
+            f.hidden = set(base.hidden)
             clip.frames.append(f)
         self.project.clips.append(clip)
         self.cur_clip = len(self.project.clips) - 1
@@ -1455,6 +1501,8 @@ class App:
         """Crea una animacion NUEVA copiando una existente entera (todos sus
         frames, duracion y tamano de recuadro). Punto de partida para una
         variante sin tocar la original."""
+        if self._anim_locked():
+            return
         if i is None:
             i = self.cur_clip
         if not (0 <= i < len(self.project.clips)):
@@ -1484,7 +1532,7 @@ class App:
             self._thumbs_dirty = True
 
     def delete_clip(self, i):
-        if not (0 <= i < len(self.project.clips)):
+        if self._anim_locked() or not (0 <= i < len(self.project.clips)):
             return
         self.snapshot()
         del self.project.clips[i]
@@ -1576,8 +1624,19 @@ class App:
     # ====================================================================
     # archivo
     # ====================================================================
+    # ====================================================================
+    # nuevo elemento: body | item (ropa / caracteristica)
+    # ====================================================================
+    @property
+    def is_item(self):
+        return self.project.kind in ("ropa", "caracteristica")
+
     def new_project(self):
-        self.project = model.Project()
+        # asistente: primero pregunta si es un BODY o un ITEM
+        self.modal = ("newkind", None)
+
+    def _reset_for_new(self):
+        self.ref_project = None
         self.sel_kind, self.sel_idx = None, -1
         self.cur_clip = 0
         self.cur_frame = -1
@@ -1588,7 +1647,99 @@ class App:
         self.recovery_data = None
         recovery.clear()
         self._thumbs_dirty = True
-        self.status = "Proyecto nuevo."
+
+    def new_blank_project(self):
+        self.modal = None
+        self.project = model.Project()
+        self._reset_for_new()
+        self.status = "Proyecto en blanco."
+
+    def new_body_project(self):
+        """Body nuevo a partir del ESTANDAR (rig + animaciones, sin arte): el
+        usuario dibuja su cuerpo y lo asigna a los huesos del estandar."""
+        self.modal = None
+        path = os.path.join(templates.BUILTIN_DIR, "humano.pbproj")
+        if not os.path.isfile(path):
+            self.new_blank_project()
+            self.status = "No hay plantilla estandar; proyecto en blanco."
+            return
+        self.load_template(path)          # carga rig+anims, conserva dibujos
+        self.project.kind = "body"
+        self.status = ("Body nuevo desde el ESTANDAR. Dibuja tu arte (Pintar) y "
+                       "asignalo a los huesos.")
+
+    def new_item_project(self, kind):
+        """Item nuevo (ropa | caracteristica): referencia el body estandar como
+        guia fantasma; toma de el rig/animaciones (ropa) o solo el ancho y los
+        sockets (caracteristica)."""
+        self.modal = None
+        ref = templates.standard_body_path()
+        if not ref:
+            self.status = ("No hay cuerpo estandar. Crea un body y guardalo como "
+                           "estandar, o configura 'standard_body'.")
+            return
+        keep = self.project.drawings           # conserva dibujos del taller
+        self.project = model.Project()
+        self.project.kind = kind
+        self.project.ref_body = "@standard"
+        self.project.drawings = keep
+        self._reset_for_new()
+        self._attach_ref_body()
+        lbl = "Ropa" if kind == "ropa" else "Caracteristica"
+        self.status = (f"{lbl} nueva sobre el body estandar (fantasma). " +
+                       ("Dibuja la prenda y enlazala a los huesos." if kind == "ropa"
+                        else "Dibuja la pieza y asignale una conexion (socket)."))
+
+    # ---- referencia (body fantasma) ------------------------------------
+    def _resolve_ref(self, ref):
+        if ref in (None, "@standard"):
+            return templates.standard_body_path()
+        if os.path.isabs(ref):
+            return ref if os.path.isfile(ref) else templates.standard_body_path()
+        # relativa al .pbproj del item
+        if self.project.path:
+            cand = os.path.normpath(os.path.join(
+                os.path.dirname(self.project.path), ref))
+            if os.path.isfile(cand):
+                return cand
+        return templates.standard_body_path()
+
+    def _attach_ref_body(self):
+        """Carga el body de referencia y, para ROPA, injerta su rig+animaciones
+        en el proyecto (no editables). Para CARACTERISTICA solo fija el ancho."""
+        self.ref_project = None
+        path = self._resolve_ref(self.project.ref_body)
+        if not path:
+            self.status = "No se encontro el cuerpo estandar (item sin guia)."
+            return
+        try:
+            ref = model.Project.load(path)
+            render.ensure_surfaces(ref)
+        except Exception as e:
+            self.status = f"No se pudo cargar el body de guia: {e}"
+            return
+        self.ref_project = ref
+        pr = self.project
+        pr.tile_w = ref.tile_w
+        pr.tile_h = ref.tile_h
+        pr.box_x, pr.box_y = ref.box_x, ref.box_y
+        if pr.kind == "ropa":
+            pr.bones = ref.bones          # MISMO rig (referenciado)
+            pr.clips = ref.clips          # MISMAS animaciones
+        # caracteristica conserva sus propios bones (vacio) y clips (pocos frames)
+        self.sync_working()
+        self._thumbs_dirty = True
+
+    def _ref_idle_frame(self):
+        """Frame 'guia' del body de referencia (reposo si existe)."""
+        rp = self.ref_project
+        if rp is None:
+            return None
+        for nm in ("reposo", "idle", "caminando", "andar"):
+            c = next((c for c in rp.clips if c.name == nm), None)
+            if c and c.frames:
+                return c.frames[0]
+        return rp.clips[0].frames[0] if (rp.clips and rp.clips[0].frames) else None
 
     # -- proyecto por defecto (art-src <-> assets) -----------------------
     def set_project(self):
@@ -1626,10 +1777,13 @@ class App:
             self.status = f"Error al abrir: {e}"
             return
         render.ensure_surfaces(self.project)
+        self.ref_project = None
         self.sel_kind, self.sel_idx = None, -1
         self.cur_clip = 0
         self.cur_frame = -1
         self.draw_idx = -1
+        if self.is_item:                  # re-vincula el body de guia (fantasma)
+            self._attach_ref_body()
         self.sync_working()
         self.history.clear()
         self.dirty = False
@@ -1649,18 +1803,55 @@ class App:
         if not path:
             return
         try:
-            self.project.save(path)
+            self._save_project_to(path)
             self.dirty = False
             recovery.clear()
             self.status = f"Guardado: {os.path.basename(path)}"
         except Exception as e:
             self.status = f"Error al guardar: {e}"
 
+    def _save_project_to(self, path):
+        """Guarda el proyecto. En un ITEM, el rig y las animaciones son del body
+        REFERENCIADO: no se persisten (se re-vinculan al abrir)."""
+        pr = self.project
+        if self.is_item:
+            bones, clips = pr.bones, pr.clips
+            pr.bones, pr.clips = [], []
+            try:
+                pr.save(path)
+            finally:
+                pr.bones, pr.clips = bones, clips
+        else:
+            pr.save(path)
+
     def export_composite(self):
         if not self.project.sprites:
             self.status = "No hay imagenes para exportar."
             return
-        nfit = self.ensure_clips_fit()            # nunca recortar
+        pr = self.project
+        # ROPA: recuadro alineado al body (overlay que se deforma, no se recorta).
+        # CARACTERISTICA: se exporta RECORTADA a su contenido (el menor tamano
+        # posible, ~cabeza) y el juego la coloca por su CONEXION (socket) frame a
+        # frame -> ahorra recursos. BODY: expandir para no recortar nunca.
+        box_override = None
+        conn = None
+        warn = ""
+        if self.is_item:
+            nfit = 0
+            conn = render.part_connection(pr)
+            if not conn:
+                warn += "  ⚠ SIN conexion (el juego no sabra donde colocarla)."
+            hid = [s.name for s in pr.sprites if not s.visible]
+            if hid:
+                warn += f"  ⚠ ocultos: {', '.join(hid)} (no se exportan)."
+            if pr.kind == "caracteristica":
+                box_override = render.content_box(pr, margin=1)
+                if box_override is None:
+                    self.status = ("Nada visible para exportar (¿materiales "
+                                   "ocultos?).")
+                    return
+        else:
+            nfit = self.ensure_clips_fit()        # nunca recortar (body)
         auto = self._mirror_path(".png")          # espejo art-src -> assets
         if auto:
             path = auto
@@ -1670,14 +1861,17 @@ class App:
             if not path:
                 return
         try:
-            sz = render.export_composite(self.project, path)
-            render.export_meta(self.project, os.path.splitext(path)[0] + ".json")
+            sz = render.export_composite(pr, path, box_override)
+            render.export_meta(pr, os.path.splitext(path)[0] + ".json",
+                               box_override=box_override, connection=conn)
             shown = (os.path.relpath(path, self.project_root)
                      if self.project_root and auto else os.path.basename(path))
             extra = f" · ajuste {nfit} anim." if nfit else ""
+            if conn:
+                extra += f" · conexion '{conn}'"
             self.status = (f"Exportado {sz[0]}x{sz[1]} "
-                           f"({len(self.project.clips)} fila/s) -> {shown} + .json"
-                           + extra)
+                           f"({len(pr.clips)} fila/s) -> {shown} + .json"
+                           + extra + warn)
         except Exception as e:
             self.status = f"Error export: {e}"
 
@@ -2579,6 +2773,10 @@ class App:
             self.drag = {"mode": "global_move"}
             return
         if self.tool == "bone":
+            if self.project.kind == "ropa":   # la ropa usa el rig del body
+                self.status = ("El esqueleto es del body de referencia: no se "
+                               "edita. Enlaza la prenda al hueso con 'C'.")
+                return
             head = self.s2w(*self.mouse)
             parent = self._nearest_tip(*self.mouse)
             if parent is not None:
@@ -2608,6 +2806,8 @@ class App:
         if hb is not None:
             idx, part = hb
             self.sel_kind, self.sel_idx = "bone", idx
+            if self.project.kind == "ropa":   # rig del body: seleccionar, NO mover
+                return
             self.snapshot()
             if part == "head":
                 self.drag = {"mode": "bone_move", "idx": idx}
@@ -2861,7 +3061,66 @@ class App:
             cr = pygame.Rect(r.x + 12, r.bottom - 34, mw - 24, 24)
             if self.button(cr, "Cancelar (Esc)"):
                 self.modal = None
+        elif kind == "newkind":
+            self._modal_menu("Nuevo elemento", "¿Que vas a crear?", [
+                ("body", "Body nuevo",
+                 "Cuerpo + animaciones, partiendo del estandar",
+                 self.new_body_project),
+                ("box", "Item nuevo",
+                 "Ropa o caracteristica, sobre el body estandar",
+                 lambda: setattr(self, "modal", ("newitem", None))),
+                ("page", "Proyecto en blanco",
+                 "Empezar de cero, sin plantilla", self.new_blank_project),
+            ])
+        elif kind == "newitem":
+            self._modal_menu("Nuevo item",
+                             "Se usa el body estandar como guia (fantasma)", [
+                ("shirt", "Ropa",
+                 "Sigue al cuerpo: camisa, pantalon, zapatos",
+                 lambda: self.new_item_project("ropa")),
+                ("face", "Caracteristica",
+                 "Cara / pelo por conexion (socket)",
+                 lambda: self.new_item_project("caracteristica")),
+            ], back=("newkind", None))
         self._drawing_modal = False
+
+    def _modal_menu(self, title, subtitle, cards, back=None):
+        """Modal con tarjetas grandes (icono + titulo + descripcion)."""
+        w, h = self.screen.get_size()
+        mw, ch = 460, 62
+        mh = 80 + len(cards) * (ch + 10) + 40
+        r = pygame.Rect((w - mw) // 2, (h - mh) // 2, mw, mh)
+        sh = pygame.Surface((r.w + 16, r.h + 16), pygame.SRCALPHA)
+        sh.fill((0, 0, 0, 120))
+        self.screen.blit(sh, (r.x - 8, r.y - 4))
+        pygame.draw.rect(self.screen, PANEL, r, border_radius=12)
+        pygame.draw.rect(self.screen, ACCENT, r, 2, border_radius=12)
+        self.text(title, (r.x + 20, r.y + 16), ACCENT, font=self.font_b)
+        self.text(subtitle, (r.x + 20, r.y + 38), DIM, font=self.font_s)
+        y = r.y + 66
+        for icon, t, sub, fn in cards:
+            card = pygame.Rect(r.x + 16, y, mw - 32, ch)
+            hot = card.collidepoint(self.mouse)
+            pygame.draw.rect(self.screen, HOVER if hot else PANEL2, card,
+                             border_radius=10)
+            pygame.draw.rect(self.screen, ACCENT if hot else LINE, card,
+                             2 if hot else 1, border_radius=10)
+            ib = pygame.Rect(card.x + 10, card.y + 10, ch - 20, ch - 20)
+            pygame.draw.rect(self.screen, (28, 31, 40), ib, border_radius=8)
+            pygame.draw.rect(self.screen, ACCENT if hot else LINE, ib, 1,
+                             border_radius=8)
+            self._draw_icon(icon, ib.inflate(-8, -8), ACCENT if hot else TEXT)
+            self.text(t, (ib.right + 14, card.y + 12),
+                      SELECT if hot else TEXT, font=self.font_b)
+            self.text(sub, (ib.right + 14, card.y + 34), DIM, font=self.font_s)
+            if self.lmb_down and hot:
+                fn()
+                self._drawing_modal = False
+                return
+            y += ch + 10
+        cr = pygame.Rect(r.x + 16, r.bottom - 32, mw - 32, 24)
+        if self.button(cr, "‹ Atras" if back else "Cancelar (Esc)"):
+            self.modal = back
 
     def _draw_canvas(self):
         c = self.r_canvas
@@ -2880,6 +3139,7 @@ class App:
         self._draw_grid(box)
         pygame.draw.rect(self.screen, ACCENT, box, 1)
 
+        self._draw_ghost_body()           # body de guia (item), por detras
         render.draw_sprites(self.screen, self.project, self.active_frame(),
                             self.w2s, zoom=self.zoom)
 
@@ -2890,6 +3150,8 @@ class App:
                 self._draw_links()
                 self._draw_bones()
         if not self.playing:
+            if self.project.kind == "caracteristica":
+                self._draw_ref_sockets()      # sockets del body (rig no injertado)
             self._draw_socket_overlay()
             self._draw_sprite_gizmo()
         if self.tool == "link" and not self.playing:
@@ -3001,6 +3263,48 @@ class App:
                                 (iy - sp.pivot[1]) * wt[3], wt[2])
             pts.append(self.w2s(wt[0] + ox, wt[1] + oy))
         pygame.draw.polygon(self.screen, (130, 220, 150), pts, 2)
+
+    def _draw_ref_sockets(self):
+        """Dibuja los SOCKETS del body de referencia (ojos/pelo/...) como guia,
+        para colocar una caracteristica relativa a su conexion."""
+        rp = self.ref_project
+        if rp is None:
+            return
+        pf = model.pose_for_frame(rp, self._ref_idle_frame())
+        for idx, b in enumerate(rp.bones):
+            if not getattr(b, "anchor", False) or b.name not in model.SOCKETS:
+                continue
+            wx, wy, _, _ = model.bone_world(rp, idx, pf)
+            sx, sy = self.w2s(wx, wy)
+            self._socket_marker(int(sx), int(sy), b.name, False)
+
+    def _draw_ghost_body(self):
+        """Dibuja el body de referencia (semi-transparente) detras del item, como
+        guia. Ropa: posado con el frame actual (rig compartido). Caracteristica:
+        en reposo (la pieza solo se dibuja una vez)."""
+        rp = self.ref_project
+        if rp is None or not rp.sprites:
+            return
+        frame = (self.active_frame() if self.project.kind == "ropa"
+                 else self._ref_idle_frame())
+        temp = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+        render.draw_sprites(temp, rp, frame, self.w2s, zoom=self.zoom)
+        temp.fill((255, 255, 255, 95), special_flags=pygame.BLEND_RGBA_MULT)
+        self.screen.blit(temp, (0, 0))
+
+    def _ghost_tile_surface(self):
+        """Composicion del body de referencia en reposo, en pixeles del tile
+        (para el fondo-guia del modo Pintar). Cacheada por tamano."""
+        rp = self.ref_project
+        if rp is None or not rp.sprites:
+            return None
+        box = (rp.box_x, rp.box_y, rp.tile_w, rp.tile_h)
+        key = (id(rp), box)
+        if getattr(self, "_ghost_key", None) != key:
+            self._ghost_key = key
+            self._ghost_surf = render.render_tile(rp, self._ref_idle_frame(),
+                                                  None, box)
+        return self._ghost_surf
 
     def _draw_sprite_gizmo(self):
         sp = self.selected_sprite()
@@ -3154,6 +3458,8 @@ class App:
                 self._paint_tool_btn(r, t, letter)
             return
         tools = ["select", "bone", "link", "scale", "move", "hand"]
+        if self.project.kind == "ropa":   # ropa usa el rig del body: sin hueso
+            tools = ["select", "link", "scale", "move", "hand"]
         bar = pygame.Rect(c.x + 6, c.y + 30, 40, 8 + len(tools) * 40)
         pygame.draw.rect(self.screen, PANEL, bar, border_radius=6)
         pygame.draw.rect(self.screen, LINE, bar, 1, border_radius=6)
@@ -3331,6 +3637,26 @@ class App:
         elif name == "shoes":                                # bota/zapato
             poly([(-9, 7), (-9, 2), (-3, 2), (-1, -2), (-1, -8), (3, -8),
                   (4, 2), (9, 4), (9, 7)], 1)
+        elif name == "body":                                 # personaje (cuerpo)
+            circ((0, -9), 3.4, 0)                            # cabeza
+            line((0, -5), (0, 5), 2)                         # torso
+            line((-7, -1), (7, -1), 2)                       # brazos
+            line((0, 5), (-5, 12), 2); line((0, 5), (5, 12), 2)  # piernas
+        elif name == "box":                                  # caja/paquete
+            poly([(-9, -3), (0, -8), (9, -3), (0, 2)], 1)    # tapa (rombo)
+            line((-9, -3), (-9, 8)); line((9, -3), (9, 8))
+            line((-9, 8), (0, 12)); line((9, 8), (0, 12))
+            line((0, 2), (0, 12), 1)                         # arista frontal
+        elif name == "page":                                 # documento
+            poly([(-7, -11), (3, -11), (7, -7), (7, 11), (-7, 11)], 1)
+            line((3, -11), (3, -7)); line((3, -7), (7, -7))  # esquina doblada
+            for yy in (-3, 1, 5):
+                line((-4, yy), (4, yy), 1)
+        elif name == "face":                                 # rostro (caracteristica)
+            circ((0, 0), 9, 1)
+            circ((-3, -2), 1.3, 0); circ((3, -2), 1.3, 0)    # ojos
+            line((-1, 0), (-2, 3), 1)                        # nariz
+            line((-3, 5), (3, 5), 1)                         # boca
 
     def _tool_btn(self, rect, tool):
         active = self.tool == tool
@@ -3442,7 +3768,7 @@ class App:
             sp = self.project.sprites[idx]
             sel = (self.sel_kind == "sprite" and self.sel_idx == idx)
             y, dele = self._list_row(
-                p, y, sp.name, sel, sp.visible,
+                p, y, sp.name, sel, self._sprite_visible_now(sp),
                 lambda i=idx: self._sel("sprite", i),
                 lambda i=idx: self._toggle_vis_sprite(i),
                 tag="B" if sp.bone else "", thumb=sp.surface,
@@ -3588,8 +3914,26 @@ class App:
 
     def _toggle_vis_sprite(self, idx):
         self.snapshot()
-        self.project.sprites[idx].visible = not self.project.sprites[idx].visible
+        sp = self.project.sprites[idx]
+        if self.cur_frame >= 0:           # ocultar/mostrar SOLO en el frame actual
+            fr = self.frames[self.cur_frame]
+            if sp.name in fr.hidden:
+                fr.hidden.discard(sp.name)
+            else:
+                fr.hidden.add(sp.name)
+            self.status = (f"'{sp.name}' "
+                           + ("oculto" if sp.name in fr.hidden else "visible")
+                           + f" en el frame {self.cur_frame + 1}.")
+        else:                             # en reposo: visibilidad global del material
+            sp.visible = not sp.visible
         self._thumbs_dirty = True
+
+    def _sprite_visible_now(self, sp):
+        """Visibilidad del material AHORA: en un frame la decide ese frame
+        (libre); en reposo, el visible global."""
+        if self.cur_frame >= 0:
+            return sp.name not in self.frames[self.cur_frame].hidden
+        return sp.visible
 
     # ====================================================================
     # dibujo del modo Pintar
@@ -3614,6 +3958,12 @@ class App:
         rect = pygame.Rect(int(x0), int(y0), max(1, int(x1 - x0)),
                            max(1, int(y1 - y0)))
         self._draw_checker(rect)
+        if self.is_item:                  # body de guia (fantasma) detras del dibujo
+            ghost = self._ghost_tile_surface()
+            if ghost is not None:
+                g = pygame.transform.scale(ghost, rect.size)
+                g.fill((255, 255, 255, 90), special_flags=pygame.BLEND_RGBA_MULT)
+                self.screen.blit(g, rect.topleft)
         self.screen.blit(pygame.transform.scale(sp.surface, rect.size),
                          rect.topleft)
         pygame.draw.rect(self.screen, ACCENT, rect, 1)
@@ -4100,13 +4450,29 @@ class App:
 
         open3, y = self._fold_header(x, w, y, p, "tile", "TILE / PROYECTO")
         if open3:
-            self.text("Tamaño del lienzo (clic y escribe):", (x, y), DIM,
-                      font=self.font_s)
-            y += 18
-            for key, lbl in (("tile_w", "Tile ancho"), ("tile_h", "Tile alto"),
-                             ("box_x", "Caja X"), ("box_y", "Caja Y")):
-                self._num_field(x, w, y, key, lbl, getattr(self.project, key))
-                y += 26
+            if self.is_item:
+                self.text("Lienzo BLOQUEADO al body de referencia:", (x, y), DIM,
+                          font=self.font_s)
+                y += 18
+                self.text(f"Ancho {self.project.tile_w}  ·  Alto "
+                          f"{self.project.tile_h}", (x + 4, y), TEXT,
+                          font=self.font_s)
+                y += 22
+                if self.project.kind == "caracteristica":
+                    for ln in ("Se exporta RECORTADA al contenido (minimo",
+                               "tamano) + conexion: el juego la coloca por",
+                               "su socket frame a frame."):
+                        self.text(ln, (x, y), DIM, font=self.font_s)
+                        y += 15
+                    y += 6
+            else:
+                self.text("Tamaño del lienzo (clic y escribe):", (x, y), DIM,
+                          font=self.font_s)
+                y += 18
+                for key, lbl in (("tile_w", "Tile ancho"), ("tile_h", "Tile alto"),
+                                 ("box_x", "Caja X"), ("box_y", "Caja Y")):
+                    self._num_field(x, w, y, key, lbl, getattr(self.project, key))
+                    y += 26
 
         self._right_content_h = y - y0 + 8
         self.screen.set_clip(None)

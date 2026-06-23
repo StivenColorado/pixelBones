@@ -17,6 +17,17 @@ from . import model, config
 TEMPLATES_DIR = os.path.join(config.CONFIG_DIR, "templates")
 # plantillas que vienen con el programa
 BUILTIN_DIR = os.path.join(os.path.dirname(__file__), "templates")
+# cuerpo estandar CON arte (referencia/fantasma de los items: ropa/caracteristica)
+STANDARD_BODY = os.path.join(BUILTIN_DIR, "_standard_body.pbproj")
+
+
+def standard_body_path():
+    """Ruta del cuerpo estandar (con arte) usado como guia fantasma de los items.
+    El usuario puede sobreescribirla en config (clave 'standard_body')."""
+    p = config.load().get("standard_body")
+    if p and os.path.isfile(p):
+        return p
+    return STANDARD_BODY if os.path.isfile(STANDARD_BODY) else None
 
 
 def _ensure_dirs():
@@ -98,6 +109,17 @@ def rig_profile(project):
     tch = children[torso]
     arm_roots = [c for c in tch if children[c]]
     head = [c for c in tch if not children[c]]
+    if not head and tch:
+        # rig con cabeza ENCADENADA (cuello+cabeza): la cabeza es el hueso del
+        # subarbol del torso cuya PUNTA queda mas arriba (y mas negativo).
+        pf = model.pose_for_frame(project, None)
+        sub, stack = [], list(tch)
+        while stack:
+            i = stack.pop(); sub.append(i); stack.extend(children[i])
+        top = min(sub, key=lambda i: model.bone_tip(
+            project, i, model.bone_world(project, i, pf))[1])
+        head = [top]
+        arm_roots = [c for c in tch if c != top and children[c]]
     arm_chains = [chain(a) for a in arm_roots]
     leg_chains = [chain(l) for l in legs]
 
