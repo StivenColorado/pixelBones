@@ -89,13 +89,19 @@ def decode_surface(d):
 # Layer (capa raster de un sprite, estilo Pixelorama)
 # ---------------------------------------------------------------------------
 class Layer:
-    def __init__(self, name="capa", surface=None, visible=True, opacity=1.0):
+    def __init__(self, name="capa", surface=None, visible=True, opacity=1.0,
+                 lid=None):
         self.name = name
         self.visible = visible
         self.opacity = float(opacity)
         self.surface = surface          # pygame.Surface SRCALPHA
+        # identidad estable de la capa: vincula la capa de un DIBUJO (taller) con
+        # el MATERIAL que genero al 'Enviar' -> reenviar actualiza, no duplica.
+        self.lid = lid
 
     def clone(self):
+        # clon = NUEVA identidad (lid no se copia): pegar/duplicar no debe
+        # secuestrar el material de la capa original.
         c = Layer(self.name, None, self.visible, self.opacity)
         if self.surface is not None:
             c.surface = self.surface.copy()
@@ -103,6 +109,8 @@ class Layer:
 
     def to_dict(self):
         d = {"name": self.name, "visible": self.visible, "opacity": self.opacity}
+        if self.lid:
+            d["lid"] = self.lid
         if self.surface is not None:
             d.update(encode_surface(self.surface))
         return d
@@ -110,7 +118,8 @@ class Layer:
     @classmethod
     def from_dict(cls, d):
         return cls(d.get("name", "capa"), decode_surface(d),
-                   d.get("visible", True), d.get("opacity", 1.0))
+                   d.get("visible", True), d.get("opacity", 1.0),
+                   lid=d.get("lid"))
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +138,8 @@ class Sprite:
         self.visible = True
         self.layers = []               # list[Layer]; vacia => se crea al cargar
         self.active_layer = 0
+        self.origin = None             # lid de la capa-fuente (taller) | None;
+                                       # reenviar ese dibujo ACTUALIZA este material
         # runtime (no se serializa)
         self.surface = None            # composicion de las capas visibles
         self.size = (0, 0)
@@ -141,7 +152,7 @@ class Sprite:
                 "connection": self.connection,
                 "z": self.z, "visible": self.visible,
                 "layers": [l.to_dict() for l in self.layers],
-                "active_layer": self.active_layer}
+                "active_layer": self.active_layer, "origin": self.origin}
 
     @classmethod
     def from_dict(cls, d):
@@ -155,6 +166,7 @@ class Sprite:
         s.visible = d.get("visible", True)
         s.layers = [Layer.from_dict(ld) for ld in d.get("layers", [])]
         s.active_layer = d.get("active_layer", 0)
+        s.origin = d.get("origin")
         return s
 
 

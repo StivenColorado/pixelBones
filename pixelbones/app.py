@@ -11,6 +11,7 @@ Dos herramientas:
 from __future__ import annotations
 import math
 import os
+import uuid
 import pygame
 
 from . import model, render, dialogs, recovery, paint, config, appicon, templates
@@ -66,6 +67,7 @@ class App:
         self.working = {}             # bone_name -> pose
 
         self.tool = "select"          # select | bone | link  (modo animar)
+        self.scale_mode = "bones"     # "bones" (esqueleto) | "materials" (arte)
         self.link_bone = None         # hueso origen durante el enlace de 2 clics
         self.show_bones = True
         self.show_help = False
@@ -82,6 +84,9 @@ class App:
         self.paint_redo = []
         self.line_anchor = None       # estado de linea/curva en curso
         self._cursor = None
+        self._rotate_cursor = None    # cursor custom de rotacion (lazy)
+        self._hover_node = -1         # hueso cuyo NODO esta bajo el mouse (hover)
+        self._preview = None          # (surface, label, anchor_x, y) hover preview
         self._sv_key = None           # cache del cuadro Saturacion/Valor
         self._sv_surf = None
         self._hue_surf = None
@@ -122,6 +127,8 @@ class App:
         self.history = History()
         self.dirty = False
         self.editing = None           # ("rename_sprite"|"rename_bone", idx)
+        self._last_row_click = None    # (edit_tuple, ms) para detectar doble clic
+        self._edit_sel_all = None      # tupla de edicion con TODO seleccionado
         self.edit_buf = ""
         self._caption = ""
 
@@ -249,6 +256,20 @@ class App:
         elif key == pygame.K_c:
             self.tool, self.link_bone = "link", None
             self.status = "Enlace: clic en un hueso y luego en una imagen."
+        elif key == pygame.K_e:
+            if self.tool == "scale":                 # re-pulsar E alterna el modo
+                self.scale_mode = ("materials" if self.scale_mode == "bones"
+                                   else "bones")
+            else:
+                self.tool, self.link_bone = "scale", None
+            modo = ("ESQUELETO (huesos)" if self.scale_mode == "bones"
+                    else "MATERIALES (arte)")
+            self.status = (f"Escalar [{modo}]: arrastra horizontal. E alterna modo. "
+                           "Afecta todas las animaciones.")
+        elif key == pygame.K_m:
+            self.tool, self.link_bone = "move", None
+            self.status = ("Mover: arrastra para reubicar TODO el personaje en "
+                           "todas las animaciones (no descuadra los frames).")
         elif key == pygame.K_h:
             self.tool, self.link_bone = "hand", None
         elif key == pygame.K_k:
@@ -354,15 +375,43 @@ class App:
         else:                                   # nada seleccionado: la animacion
             self.rename_clip()
 
+    def _edit_all_selected(self):
+        return self.editing is not None and self._edit_sel_all == self.editing
+
+    def _draw_edit_buf(self, x, y):
+        """Dibuja el texto en edicion con cursor, o resaltado si esta TODO
+        seleccionado (Ctrl+A). Usado por todos los campos de renombrar."""
+        txt = self.edit_buf
+        if self._edit_all_selected() and txt:
+            w = self.font_s.size(txt)[0]
+            pygame.draw.rect(self.screen, (60, 95, 150),
+                             pygame.Rect(x - 1, y - 1, w + 2, 16))
+            self.text(txt, (x, y), TEXT, font=self.font_s)
+        else:
+            caret = "|" if (pygame.time.get_ticks() // 400) % 2 else ""
+            self.text(txt + caret, (x, y), TEXT, font=self.font_s)
+
     def _edit_key(self, e):
+        ctrl = pygame.key.get_mods() & pygame.KMOD_CTRL
+        if ctrl and e.key == pygame.K_a:          # Ctrl+A: seleccionar todo
+            self._edit_sel_all = self.editing
+            return
         if e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             self._commit_rename()
         elif e.key == pygame.K_ESCAPE:
             self.editing = None
-        elif e.key == pygame.K_BACKSPACE:
-            self.edit_buf = self.edit_buf[:-1]
-        elif e.unicode and e.unicode.isprintable() and len(self.edit_buf) < 40:
-            self.edit_buf += e.unicode
+        elif e.key in (pygame.K_BACKSPACE, pygame.K_DELETE):
+            if self._edit_all_selected():         # borra TODO de una
+                self.edit_buf = ""
+            elif e.key == pygame.K_BACKSPACE:
+                self.edit_buf = self.edit_buf[:-1]
+            self._edit_sel_all = None
+        elif e.unicode and e.unicode.isprintable():
+            if self._edit_all_selected():         # teclear REEMPLAZA lo seleccionado
+                self.edit_buf = ""
+            self._edit_sel_all = None
+            if len(self.edit_buf) < 40:
+                self.edit_buf += e.unicode
 
     def _num_field(self, x, w, y, key, label, value):
         """Campo numérico EDITABLE escribiendo (clic -> teclea -> Enter). Para el
@@ -591,6 +640,80 @@ class App:
             self.project.bones[bone_idx].rest = pose
         self.dirty = True
 
+    def apply_global_scale(self, f, pivot):
+        """Reescala TODO el personaje por el factor f respecto a `pivot`, afectando
+        a TODAS las animaciones. Solo toca huesos RAIZ (pose de reposo + cada
+        frame) y sprites libres: el resto del rig hereda la escala por la cadena
+        padre->hijo, asi que no hay que tocar huesos hijos ni sprites vinculados.
+        """
+        if f == 1.0:
+            return
+        cx, cy = pivot
+
+        def sc(p):
+            p["x"] = cx + (p["x"] - cx) * f
+            p["y"] = cy + (p["y"] - cy) * f
+            p["scale"] = p.get("scale", 1.0) * f
+
+        roots = {b.name for b in self.project.bones if b.parent < 0}
+        for b in self.project.bones:
+            if b.name in roots:
+                sc(b.rest)
+        for c in self.project.clips:
+            for fr in c.frames:
+                for name in roots:
+                    if name in fr.poses:
+                        sc(fr.poses[name])
+        for s in self.project.sprites:
+            if not s.bone:
+                sc(s.transform)
+        self.sync_working()
+        self.dirty = True
+        self._thumbs_dirty = True
+
+    def apply_material_scale(self, f):
+        """Escala SOLO el tamano de los materiales (el arte) por el factor f, SIN
+        tocar el esqueleto: multiplica la escala propia de cada sprite (local si
+        esta vinculado a un hueso, transform si es libre). Los huesos y las poses
+        no cambian, asi que cada pieza crece/encoge anclada en su sitio, en TODAS
+        las animaciones. Util cuando el dibujo quedo chico/grande para el rig."""
+        if f == 1.0:
+            return
+        for s in self.project.sprites:
+            t = s.local if s.bone else s.transform
+            t["scale"] = t.get("scale", 1.0) * f
+        self.dirty = True
+        self._thumbs_dirty = True
+
+    def apply_global_move(self, dx, dy):
+        """Desplaza TODO el personaje por (dx, dy) en mundo, en TODAS las
+        animaciones. Aplica el MISMO delta al reposo y a cada frame, asi las
+        posiciones relativas entre frames no cambian (no descuadra la altura).
+        Igual que la escala: solo huesos RAIZ + sprites libres; el resto hereda.
+        """
+        if dx == 0.0 and dy == 0.0:
+            return
+
+        def mv(p):
+            p["x"] += dx
+            p["y"] += dy
+
+        roots = {b.name for b in self.project.bones if b.parent < 0}
+        for b in self.project.bones:
+            if b.name in roots:
+                mv(b.rest)
+        for c in self.project.clips:
+            for fr in c.frames:
+                for name in roots:
+                    if name in fr.poses:
+                        mv(fr.poses[name])
+        for s in self.project.sprites:
+            if not s.bone:
+                mv(s.transform)
+        self.sync_working()
+        self.dirty = True
+        self._thumbs_dirty = True
+
     # ====================================================================
     # historial / dirty / recuperacion / caption
     # ====================================================================
@@ -773,13 +896,34 @@ class App:
         "zapato_izq": (0.40, 0.95), "zapato_der": (0.60, 0.95),
     }
 
+    # sockets de la CARA: su posicion se deriva del hueso de la cabeza, NO del
+    # tile. t = fraccion a lo largo del hueso, 0 = punta (corona) .. 1 = base
+    # (cuello). Asi pelo/ojos/nariz/boca caen siempre SOBRE la cabeza real,
+    # cualquiera sea su tamano o posicion (estilo cara distribuida).
+    _FACE_T = {"pelo": 0.05, "ojos": 0.30, "nariz": 0.52, "boca": 0.72}
+
+    def _head_bone_idx(self):
+        """Indice del hueso 'cabeza' (o -1). Si ya hay un socket facial enganchado,
+        la cabeza es su padre (el perfil del rig deja de detectarla en cuanto la
+        cabeza tiene un hijo anclado, asi que esto lo hace robusto)."""
+        for b in self.project.bones:
+            if b.name in self._FACE_T and b.parent >= 0:
+                return b.parent
+        try:
+            prof = templates.rig_profile(self.project)
+        except Exception:
+            prof = None
+        h = prof.get("head") if prof else None
+        return h if (h is not None and 0 <= h < len(self.project.bones)) else -1
+
     def create_socket(self, sid):
         """Crea (o selecciona) el punto de conexion 'sid' en el cuerpo. Es un
         anchor con nombre reservado: sigue el rig por frame como cualquier hueso.
 
-        - Si hay un HUESO seleccionado, el punto se crea PEGADO a su punta (hijo
-          suyo) -> se mueve con ese hueso, sin arrastrarlo al centro.
-        - Si no, cae en una posicion logica segun el socket (ojos arriba, etc.).
+        - Sockets de la CARA (pelo/ojos/nariz/boca): se colocan SOBRE el hueso de
+          la cabeza (el seleccionado, o el detectado por el perfil del rig) y se
+          enganchan a el -> toda la cara sigue la cabeza y queda a su tamano.
+        - Otros sockets: posicion logica en el tile; hijos del hueso seleccionado.
         """
         lbl = model.SOCKET_LABELS.get(sid, sid)
         idx = self.project.bone_by_name(sid)
@@ -793,32 +937,50 @@ class App:
         b = model.Bone(sid)
         b.anchor = True
         b.length = 10.0
-        # posicion facial/logica del socket (en mundo)
-        fx, fy = self._SOCKET_DEFAULT.get(sid, (0.5, 0.5))
-        wx = self.project.box_x + self.project.tile_w * fx
-        wy = self.project.box_y + self.project.tile_h * fy
+
         sel_bone = self.selected_bone() if self.sel_kind == "bone" else None
         # solo se pega a un hueso del RIG (no a otro socket: evita encadenarlos).
         if sel_bone is not None and sel_bone.name in model.SOCKETS:
             sel_bone = None
-        if sel_bone is not None:        # HIJO del hueso elegido, en su sitio facial
-            pidx = self.sel_idx
-            pw = model.bone_world(self.project, pidx, self.pose_for())
+
+        # referencia para la CARA: el hueso elegido o la cabeza detectada.
+        ref = (self.sel_idx if sel_bone is not None
+               else (self._head_bone_idx() if sid in self._FACE_T else -1))
+
+        if sid in self._FACE_T and ref >= 0:
+            # posicion = punto a lo largo del hueso de la cabeza (corona->cuello)
+            hw = model.bone_world(self.project, ref, self.pose_for())
+            hx, hy = hw[0], hw[1]
+            tx, ty = model.bone_tip(self.project, ref, hw)
+            t = self._FACE_T[sid]
+            wx = tx + (hx - tx) * t                     # t=0 corona, t=1 cuello
+            wy = ty + (hy - ty) * t
+            parent_idx = ref
+        else:
+            # fallback: posicion logica en el tile (manos, piernas, o sin cabeza)
+            fx, fy = self._SOCKET_DEFAULT.get(sid, (0.5, 0.5))
+            wx = self.project.box_x + self.project.tile_w * fx
+            wy = self.project.box_y + self.project.tile_h * fy
+            parent_idx = self.sel_idx if sel_bone is not None else -1
+
+        if parent_idx >= 0:             # HIJO del hueso: se mueve con el, sin saltar
+            pw = model.bone_world(self.project, parent_idx, self.pose_for())
             dx, dy = wx - pw[0], wy - pw[1]
             aa = math.radians(-pw[2])
             cc, ss = math.cos(aa), math.sin(aa)
             psc = pw[3] or 1.0
-            b.parent = pidx
+            b.parent = parent_idx
             b.rest = {"x": (dx * cc - dy * ss) / psc,
                       "y": (dx * ss + dy * cc) / psc,
                       "rot": -pw[2], "scale": 1.0}
-            msg = (f"'{lbl}' enlazado al hueso '{sel_bone.name}': se coloco en su "
-                   "sitio y seguira ese hueso (toda la cara con uno solo).")
+            pname = self.project.bones[parent_idx].name
+            msg = (f"'{lbl}' colocado sobre la cabeza ('{pname}') y enlazado a "
+                   "ella: toda la cara la sigue.")
         else:                                           # punto libre en su sitio
             b.parent = -1
             b.rest = {"x": wx, "y": wy, "rot": 0.0, "scale": 1.0}
-            msg = (f"Punto '{lbl}' creado. Selecciona el hueso 'cabeza' y pulsa de "
-                   "nuevo para enlazar toda la cara a el.")
+            msg = (f"Punto '{lbl}' creado. Selecciona el hueso de la cabeza y "
+                   "pulsa de nuevo para enlazar toda la cara a el.")
         self.project.bones.append(b)
         self.working[b.name] = model.clone_pose(b.rest)
         self.sel_kind, self.sel_idx = "bone", len(self.project.bones) - 1
@@ -856,17 +1018,24 @@ class App:
             self.status = f"No se pudo cargar la plantilla: {e}"
             return
         self.snapshot()
+        # la plantilla SOLO aporta rig + animaciones: conserva tus DIBUJOS del
+        # taller (modo Pintar), que son tu arte y no dependen del esqueleto.
+        kept_drawings = self.project.drawings
         self.project = pr
+        self.project.drawings = kept_drawings
         self.sel_kind, self.sel_idx = None, -1
         self.cur_clip = 0
         self.cur_frame = -1
+        self.draw_idx = min(self.draw_idx, len(kept_drawings) - 1)
         self.sync_working()
         self._thumbs_dirty = True
         self.dirty = True
         self._fold["assign"] = False        # abrir el asistente
+        kept = (f" Se conservaron {len(kept_drawings)} dibujo(s) del taller."
+                if kept_drawings else "")
         self.status = (f"Plantilla cargada ({len(pr.bones)} huesos, "
                        f"{len(pr.clips)} animaciones). Importa tu arte y asignalo "
-                       "a los huesos (panel derecho).")
+                       "a los huesos (panel derecho)." + kept)
 
     def _sprite_centroid_world(self, sp):
         """Centro del CONTENIDO del sprite en mundo (mejor que el pivot para
@@ -880,6 +1049,83 @@ class App:
         ox, oy = model._rot((mx - sp.pivot[0]) * wt[3],
                             (my - sp.pivot[1]) * wt[3], wt[2])
         return wt[0] + ox, wt[1] + oy
+
+    def _content_center_img(self, sp):
+        """Centro del contenido en pixeles de la imagen (o el pivot si no hay)."""
+        if sp.content_rect:
+            cx, cy, cw, ch = sp.content_rect
+            return (cx + cw / 2.0, cy + ch / 2.0)
+        return (sp.pivot[0], sp.pivot[1])
+
+    def _sprite_corners_screen(self, sp):
+        """4 esquinas del contenido del sprite en pantalla (rotadas con el)."""
+        if not sp.content_rect:
+            return []
+        wt = model.sprite_world(self.project, sp, self.pose_for())
+        cx, cy, cw, ch = sp.content_rect
+        out = []
+        for ix, iy in ((cx, cy), (cx + cw, cy), (cx + cw, cy + ch), (cx, cy + ch)):
+            ox, oy = model._rot((ix - sp.pivot[0]) * wt[3],
+                                (iy - sp.pivot[1]) * wt[3], wt[2])
+            out.append(self.w2s(wt[0] + ox, wt[1] + oy))
+        return out
+
+    def _near_sprite_corner(self, sp, r=13):
+        return any(math.hypot(self.mouse[0] - sx, self.mouse[1] - sy) < r
+                   for sx, sy in self._sprite_corners_screen(sp))
+
+    def _set_sprite_rot_keep_center(self, sp, newrot, C):
+        """Fija la rotacion MUNDO del sprite a `newrot` manteniendo fijo el punto
+        `C` (centro del contenido en mundo): la pieza rota EN SU SITIO, no orbita
+        un pivot lejano. Ajusta el offset (local si esta vinculado, transform si
+        es libre) para compensar."""
+        mx, my = self._content_center_img(sp)
+        if sp.bone and self.project.bone_by_name(sp.bone) >= 0:
+            bidx = self.project.bone_by_name(sp.bone)
+            bx, by, brot, bscale = model.bone_world(self.project, bidx,
+                                                    self.pose_for())
+            wscale = bscale * sp.local.get("scale", 1.0)
+            sp.local["rot"] = newrot - brot
+            dx, dy = model._rot((mx - sp.pivot[0]) * wscale,
+                                (my - sp.pivot[1]) * wscale, newrot)
+            pwx, pwy = C[0] - dx, C[1] - dy          # pos mundo deseada del pivot
+            rx, ry = model._rot(pwx - bx, pwy - by, -brot)
+            sc = bscale or 1e-6
+            sp.local["x"], sp.local["y"] = rx / sc, ry / sc
+        else:
+            t = sp.transform
+            scale = t.get("scale", 1.0)
+            t["rot"] = newrot
+            dx, dy = model._rot((mx - sp.pivot[0]) * scale,
+                                (my - sp.pivot[1]) * scale, newrot)
+            t["x"], t["y"] = C[0] - dx, C[1] - dy
+
+    def _get_rotate_cursor(self):
+        """Cursor custom de rotacion (flecha circular), cacheado."""
+        if self._rotate_cursor is None:
+            s = pygame.Surface((28, 28), pygame.SRCALPHA)
+            rect = pygame.Rect(5, 5, 18, 18)
+            cx, cy, a, b = 14, 14, 9, 9
+
+            def pt(deg):
+                t = math.radians(deg)
+                return (cx + a * math.cos(t), cy - b * math.sin(t))
+
+            for col, wdt in (((20, 20, 24), 5), ((245, 245, 250), 3)):
+                pygame.draw.arc(s, col, rect, math.radians(25),
+                                math.radians(305), wdt)
+            pe, pp = pt(305), pt(290)                # punta de flecha tangente
+            ddx, ddy = pe[0] - pp[0], pe[1] - pp[1]
+            L = math.hypot(ddx, ddy) or 1
+            ux, uy = ddx / L, ddy / L
+            px, py = -uy, ux
+            for col, sz in (((20, 20, 24), 6), ((245, 245, 250), 5)):
+                tip = (pe[0] + ux * sz, pe[1] + uy * sz)
+                ba = (pe[0] + px * sz, pe[1] + py * sz)
+                bb = (pe[0] - px * sz, pe[1] - py * sz)
+                pygame.draw.polygon(s, col, [tip, ba, bb])
+            self._rotate_cursor = pygame.cursors.Cursor((14, 14), s)
+        return self._rotate_cursor
 
     def auto_assign_bones(self):
         """Vincula cada sprite al HUESO (segmento) mas cercano a su contenido, no
@@ -1106,13 +1352,14 @@ class App:
         for b in self.project.bones:
             f.poses[b.name] = model.clone_pose(self.working.get(b.name, b.rest))
         self.frames.append(f)
-        # quedarse en modo LIVE (no seleccionar el frame recien creado): asi el
-        # siguiente 'posar -> capturar' genera un frame DISTINTO en vez de
-        # sobrescribir el que se acaba de capturar. La pose actual se conserva.
-        self.cur_frame = -1
+        # SELECCIONAR el frame recien creado: lo que el usuario pose a partir de
+        # ahora edita ESTE frame real (no la pose 'en vivo'/reposo, que confundia
+        # con editar una copia). 'working' ya es esta pose, asi no hay salto.
+        # Pulsar K otra vez captura un NUEVO frame a partir de estos cambios.
+        self.cur_frame = len(self.frames) - 1
         self._thumbs_dirty = True
-        self.status = (f"Frame {len(self.frames)} capturado. Sigue "
-                       "posando y captura otro; o clic en un frame para editarlo.")
+        self.status = (f"Frame {len(self.frames)} capturado y seleccionado: "
+                       "tus cambios editan ESTE frame. Pulsa K para crear otro.")
 
     def select_frame(self, i):
         self.cur_frame = i
@@ -1204,6 +1451,29 @@ class App:
                        "posa y captura los siguientes."
                        if base is not None else f"Animacion '{clip.name}' creada.")
 
+    def duplicate_clip(self, i=None):
+        """Crea una animacion NUEVA copiando una existente entera (todos sus
+        frames, duracion y tamano de recuadro). Punto de partida para una
+        variante sin tocar la original."""
+        if i is None:
+            i = self.cur_clip
+        if not (0 <= i < len(self.project.clips)):
+            return
+        src = self.project.clips[i]
+        self.snapshot()
+        clip = model.Clip(self._unique_clip_name(src.name), src.duration)
+        clip.frames = [model.Frame.from_dict(f.to_dict()) for f in src.frames]
+        clip.tile_w, clip.tile_h = src.tile_w, src.tile_h
+        clip.box_x, clip.box_y = src.box_x, src.box_y
+        self.project.clips.insert(i + 1, clip)
+        self.cur_clip = i + 1
+        self.cur_frame = 0 if clip.frames else -1
+        self.playing = False
+        self.sync_working()
+        self._thumbs_dirty = True
+        self.status = (f"Animacion '{clip.name}' creada como copia de "
+                       f"'{src.name}' ({len(clip.frames)} frames).")
+
     def select_clip(self, i):
         if 0 <= i < len(self.project.clips) and i != self.cur_clip:
             self.cur_clip = i
@@ -1214,10 +1484,15 @@ class App:
             self._thumbs_dirty = True
 
     def delete_clip(self, i):
-        if len(self.project.clips) <= 1 or not (0 <= i < len(self.project.clips)):
+        if not (0 <= i < len(self.project.clips)):
             return
         self.snapshot()
         del self.project.clips[i]
+        if not self.project.clips:                # borrar la ultima -> una vacia
+            self.project.clips = [model.Clip(self._unique_clip_name("animacion"))]
+            self.status = "Animacion borrada. Queda una nueva vacia."
+        else:
+            self.status = "Animacion borrada."
         self.cur_clip = max(0, min(self.cur_clip, len(self.project.clips) - 1))
         self.cur_frame = -1
         self.playing = False
@@ -1479,18 +1754,22 @@ class App:
         tip = self.w2s(*tip_w)
         return head, tip
 
+    NODE_HIT_R = 14          # radio (px) para agarrar el NODO de un hueso
+
     def _hit_bone(self, sx, sy):
-        """Devuelve (idx, 'head'|'body') del hueso mas cercano o None."""
+        """Devuelve (idx, 'head'|'body') del hueso mas cercano o None. El NODO
+        (cabeza) tiene un area de agarre amplia para que mover huesos sea comodo;
+        el cuerpo solo gana si el mouse esta claramente sobre el, no sobre el nodo."""
         pose = self.pose_for()
         best = None
         best_d = 1e9
         for idx in range(len(self.project.bones)):
             head, tip = self._bone_endpoints_screen(idx, pose)
             dh = math.hypot(sx - head[0], sy - head[1])
-            if dh < 10 and dh < best_d:
+            if dh < self.NODE_HIT_R and dh < best_d:
                 best, best_d = (idx, "head"), dh
             db = _seg_dist((sx, sy), head, tip)
-            if db < 7 and db < best_d:
+            if db < 7 and db < best_d - 4:
                 best, best_d = (idx, "body"), db
         return best
 
@@ -1505,10 +1784,12 @@ class App:
                 best, best_d = idx, d
         return best
 
-    def _sprite_handle(self, sp, dist=44):
-        """(pivot_screen, handle_screen, rot) de la manija de rotacion."""
+    def _sprite_handle(self, sp, dist=40):
+        """(centro_screen, manija_screen, rot). El centro es el del CONTENIDO del
+        material (no el pivot del lienzo), asi el palito sale del material."""
         wt = model.sprite_world(self.project, sp, self.pose_for())
-        psx, psy = self.w2s(wt[0], wt[1])
+        cx, cy = self._sprite_centroid_world(sp)
+        psx, psy = self.w2s(cx, cy)
         ux, uy = model._rot(0, -1, wt[2])     # "arriba" del sprite
         return (psx, psy), (psx + ux * dist, psy + uy * dist), wt[2]
 
@@ -1644,9 +1925,36 @@ class App:
             want = pygame.SYSTEM_CURSOR_HAND
         elif self.mode == "animate" and over and self.tool == "link":
             want = pygame.SYSTEM_CURSOR_CROSSHAIR
+
+        # hover sobre el NODO de un hueso (modo seleccion): resalta + cursor mover
+        self._hover_node = -1
+        if (self.mode == "animate" and over and self.tool == "select"
+                and not self.playing):
+            if self.drag is not None and self.drag.get("mode") == "bone_move":
+                self._hover_node = self.drag["idx"]      # mantiene feedback al mover
+            elif self.drag is None:
+                hb = self._hit_bone(*self.mouse) if self.show_bones else None
+                if hb is not None and hb[1] == "head":
+                    self._hover_node = hb[0]
+            if self._hover_node >= 0:
+                want = pygame.SYSTEM_CURSOR_SIZEALL
+
+        # hover en una ESQUINA o la manija del material seleccionado -> rotar
+        if (self.mode == "animate" and over and self.tool == "select"
+                and not self.playing and self.drag is None):
+            ssp = self.selected_sprite()
+            if ssp is not None and ssp.surface is not None:
+                (_, _), (hx, hy), _ = self._sprite_handle(ssp)
+                if (math.hypot(self.mouse[0] - hx, self.mouse[1] - hy) < 11
+                        or self._near_sprite_corner(ssp)):
+                    want = "rotate"
+        if self.drag is not None and self.drag.get("mode") == "sprite_rotate":
+            want = "rotate"
+
         if self._cursor != want:
             try:
-                pygame.mouse.set_cursor(want)
+                cur = self._get_rotate_cursor() if want == "rotate" else want
+                pygame.mouse.set_cursor(cur)
             except Exception:
                 pass
             self._cursor = want
@@ -1794,60 +2102,101 @@ class App:
             self.editing = ("rename_drawing", self.draw_idx)
             self.edit_buf = d.name
 
+    @staticmethod
+    def _new_lid():
+        return uuid.uuid4().hex[:12]
+
     def send_drawing_as_material(self):
-        """Envia el dibujo a Animacion creando UN MATERIAL POR CAPA (las partes
-        van por separado, como el paper-doll), copiadas y alineadas. El dibujo
-        del taller queda intacto y desacoplado de los materiales."""
+        """Envia el dibujo a Animacion: UN MATERIAL POR CAPA (paper-doll). Si una
+        capa corresponde a un material EXISTENTE -por su vinculo (lid) o, en
+        proyectos viejos, por su NOMBRE- ACTUALIZA ese material en sitio,
+        conservando sus props de animacion (hueso, posicion, ESCALA, z, conexion)
+        y solo cambiando los pixeles. Asi no duplica y el cambio se ve en todas
+        las animaciones. Solo las capas sin material previo crean uno nuevo."""
         d = self.paint_target()
         if d is None or not d.layers:
             self.status = "No hay dibujo que enviar."
             return
         tw, th = self.project.tile_w, self.project.tile_h
-        created = []
+        valid = []
         for lay in d.layers:
             if not lay.visible or lay.surface is None:
                 continue
             bb = lay.surface.get_bounding_rect(min_alpha=1)
             if bb.width == 0 or bb.height == 0:
                 continue                              # capa vacia: se omite
+            valid.append(lay)
+        if not valid:
+            self.status = "El dibujo no tiene capas con contenido para enviar."
+            return
+        self.snapshot()
+        by_origin = {s.origin: s for s in self.project.sprites if s.origin}
+        created = updated = 0
+        last_idx = -1
+        for lay in valid:
             cw, ch = lay.surface.get_size()
             surf = lay.surface.copy()
             if lay.opacity < 0.999:                   # hornear opacidad de capa
                 a = max(0, min(255, int(255 * lay.opacity)))
                 surf.fill((255, 255, 255, a), special_flags=pygame.BLEND_RGBA_MULT)
+            if not lay.lid:
+                lay.lid = self._new_lid()
             base = d.name if lay.name in ("base", "capa") else lay.name
-            sp = model.Sprite(self.project.unique_sprite_name(base), None)
-            sp.layers = [model.Layer("base", surf)]
-            render.flatten_sprite(sp)
-            # pivote = centro del lienzo (mismo para todas) -> partes alineadas
-            sp.pivot = [cw / 2.0, ch / 2.0]
-            sp.transform = {"x": self.project.box_x + tw / 2,
-                            "y": self.project.box_y + th / 2,
-                            "rot": 0.0, "scale": 1.0}
-            created.append(sp)
-        if not created:
-            self.status = "El dibujo no tiene capas con contenido para enviar."
-            return
-        self.snapshot()
-        for sp in created:
-            sp.z = len(self.project.sprites)
-            self.project.sprites.append(sp)
+            target = by_origin.get(lay.lid)
+            if target is None:                        # legado: adoptar por NOMBRE
+                target = next((s for s in self.project.sprites
+                               if s.name == base and not s.origin), None)
+                if target is not None:
+                    target.origin = lay.lid           # deja el vinculo para el futuro
+                    by_origin[lay.lid] = target
+            if target is not None:                    # ACTUALIZA: solo los pixeles
+                target.layers = [model.Layer("base", surf)]
+                render.flatten_sprite(target)
+                target.pivot = [cw / 2.0, ch / 2.0]
+                updated += 1
+                last_idx = self.project.sprites.index(target)
+            else:                                     # CREA un material nuevo
+                sp = model.Sprite(self.project.unique_sprite_name(base), None)
+                sp.origin = lay.lid
+                sp.layers = [model.Layer("base", surf)]
+                render.flatten_sprite(sp)
+                sp.pivot = [cw / 2.0, ch / 2.0]       # centro del lienzo -> alineado
+                sp.transform = {"x": self.project.box_x + tw / 2,
+                                "y": self.project.box_y + th / 2,
+                                "rot": 0.0, "scale": 1.0}
+                sp.z = len(self.project.sprites)
+                self.project.sprites.append(sp)
+                by_origin[sp.origin] = sp
+                created += 1
+                last_idx = len(self.project.sprites) - 1
         self.mode = "animate"
-        self.sel_kind, self.sel_idx = "sprite", len(self.project.sprites) - 1
+        if last_idx >= 0:
+            self.sel_kind, self.sel_idx = "sprite", last_idx
         self._thumbs_dirty = True
-        self.status = (f"{len(created)} parte(s) enviada(s) a Animacion (una por "
-                       "capa). Enlaza cada parte a su hueso con 'C'.")
+        parts = []
+        if created:
+            parts.append(f"{created} nueva(s)")
+        if updated:
+            parts.append(f"{updated} actualizada(s)")
+        tail = ("Enlaza las nuevas a su hueso con 'C'." if created
+                else "El cambio se aplico en todas las animaciones.")
+        self.status = f"Materiales: {', '.join(parts)}. {tail}"
 
     def edit_material_in_paint(self, sprite_idx):
-        """Trae un material existente al taller como COPIA editable (sin
-        afectar al material hasta que se reenvie)."""
+        """Trae un material existente al taller como COPIA editable (sin afectar
+        al material hasta reenviar). Vincula la capa base del taller al material
+        (su 'origin') para que 'Enviar' lo ACTUALICE en vez de duplicarlo."""
         if not (0 <= sprite_idx < len(self.project.sprites)):
             return
         src = self.project.sprites[sprite_idx]
         render.ensure_layers(src, (self.project.tile_w, self.project.tile_h))
         self.snapshot()
+        if not src.origin:                            # material legado: dale vinculo
+            src.origin = self._new_lid()
         d = model.Sprite(self._unique_drawing_name(src.name), src.image_path)
         d.layers = [l.clone() for l in src.layers]
+        if d.layers:                                  # capa base -> apunta al material
+            d.layers[0].lid = src.origin
         render.flatten_sprite(d)
         self.project.drawings.append(d)
         self.draw_idx = len(self.project.drawings) - 1
@@ -2210,6 +2559,25 @@ class App:
         if self.tool == "link":
             self._link_press()
             return
+        if self.tool == "scale":
+            rb, rm = self._scale_mode_rects()         # clic en el toggle de modo
+            if rb.collidepoint(self.mouse):
+                self.scale_mode = "bones"
+                return
+            if rm.collidepoint(self.mouse):
+                self.scale_mode = "materials"
+                return
+            self.snapshot()
+            pr = self.project
+            self.drag = {"mode": "global_scale", "sx": self.mouse, "applied": 1.0,
+                         "smode": self.scale_mode,
+                         "pivot": (pr.box_x + pr.tile_w / 2.0,
+                                   pr.box_y + pr.tile_h / 2.0)}
+            return
+        if self.tool == "move":
+            self.snapshot()
+            self.drag = {"mode": "global_move"}
+            return
         if self.tool == "bone":
             head = self.s2w(*self.mouse)
             parent = self._nearest_tip(*self.mouse)
@@ -2224,16 +2592,17 @@ class App:
             return
         # herramienta seleccion: manija de rotacion del sprite seleccionado
         ssp = self.selected_sprite()
-        if ssp is not None:
-            (pcx, pcy), (hx, hy), _ = self._sprite_handle(ssp)
-            if math.hypot(self.mouse[0] - hx, self.mouse[1] - hy) < 11:
+        if ssp is not None and ssp.surface is not None:
+            (pcx, pcy), (hx, hy), wrot = self._sprite_handle(ssp)
+            on_handle = math.hypot(self.mouse[0] - hx, self.mouse[1] - hy) < 11
+            if on_handle or self._near_sprite_corner(ssp):
                 self.snapshot()
                 ang0 = math.degrees(math.atan2(self.mouse[1] - pcy,
                                                self.mouse[0] - pcx))
-                rot0 = ssp.local["rot"] if ssp.bone else ssp.transform["rot"]
                 self.drag = {"mode": "sprite_rotate", "idx": self.sel_idx,
-                             "ang0": ang0, "rot0": rot0,
-                             "pcx": pcx, "pcy": pcy}
+                             "ang0": ang0, "rot0": wrot,          # rot MUNDO
+                             "pcx": pcx, "pcy": pcy,
+                             "center": self.s2w(pcx, pcy)}        # centro fijo
                 return
         hb = self._hit_bone(*self.mouse) if self.show_bones else None
         if hb is not None:
@@ -2265,8 +2634,26 @@ class App:
             self.cam_x = self.drag["cx"] - (self.mouse[0] - s0[0]) / self.zoom
             self.cam_y = self.drag["cy"] - (self.mouse[1] - s0[1]) / self.zoom
             return
+        if m == "global_scale":
+            target = max(0.05, min(20.0,
+                         1.0 + (self.mouse[0] - self.drag["sx"][0]) * 0.01))
+            f = target / self.drag["applied"]
+            if self.drag.get("smode") == "materials":
+                self.apply_material_scale(f)
+                lbl = "MATERIALES"
+            else:
+                self.apply_global_scale(f, self.drag["pivot"])
+                lbl = "ESQUELETO"
+            self.drag["applied"] = target
+            self.status = f"Escalar {lbl} x{target:.2f} (toda la animacion)"
+            return
+
         mwx, mwy = self.s2w(*self.mouse)
         pwx, pwy = self.s2w(*self.prev_mouse)
+
+        if m == "global_move":
+            self.apply_global_move(mwx - pwx, mwy - pwy)
+            return
 
         if m == "sprite_rotate":
             sp = self.project.sprites[self.drag["idx"]]
@@ -2275,10 +2662,7 @@ class App:
             rot = self.drag["rot0"] + (ang - self.drag["ang0"])
             if pygame.key.get_mods() & pygame.KMOD_CTRL:
                 rot = round(rot / 15.0) * 15.0
-            if sp.bone:
-                sp.local["rot"] = rot
-            else:
-                sp.transform["rot"] = rot
+            self._set_sprite_rot_keep_center(sp, rot, self.drag["center"])
             self.dirty = True
             self._thumbs_dirty = True
 
@@ -2386,6 +2770,7 @@ class App:
     # ====================================================================
     def _draw(self):
         self.screen.fill(BG)
+        self._preview = None          # se llena al pasar el mouse por una fila
         # con un modal abierto, la UI de fondo no debe recibir clicks
         saved_lmb = self.lmb_down
         if self.modal is not None:
@@ -2400,6 +2785,9 @@ class App:
         self._draw_right()
         self._draw_timeline()
         self._draw_splitters()
+        # preview de hover ENCIMA de todo (incl. la seccion de animacion) y completo
+        if self._preview is not None and self.modal is None:
+            self._draw_preview(*self._preview)
         if self.recovery_data:
             self._draw_recovery_banner()
         if self.show_help:
@@ -2495,9 +2883,12 @@ class App:
         render.draw_sprites(self.screen, self.project, self.active_frame(),
                             self.w2s, zoom=self.zoom)
 
-        if self.show_bones and not self.playing:
-            self._draw_links()
-            self._draw_bones()
+        if self.show_bones:
+            if self.playing:
+                self._draw_bones(ghost=True)     # tenues, sin texto, al reproducir
+            else:
+                self._draw_links()
+                self._draw_bones()
         if not self.playing:
             self._draw_socket_overlay()
             self._draw_sprite_gizmo()
@@ -2511,11 +2902,33 @@ class App:
         self.screen.set_clip(None)
 
         tool_lbl = {"select": "SELECCION (V)", "bone": "HUESO (B)",
-                    "link": "ENLACE (C)", "hand": "MANO (H)"}.get(self.tool, self.tool)
+                    "link": "ENLACE (C)", "scale": "ESCALAR (E)",
+                    "move": "MOVER (M)",
+                    "hand": "MANO (H)"}.get(self.tool, self.tool)
         self.text(tool_lbl, (c.x + 56, c.y + 8), ACCENT, font=self.font_b)
+        if self.tool == "scale":                      # toggle de modo de escala
+            rb, rm = self._scale_mode_rects()
+            self._mode_pill(rb, "Esqueleto", self.scale_mode == "bones")
+            self._mode_pill(rm, "Materiales", self.scale_mode == "materials")
         fr = ("Reposo" if self.cur_frame < 0
               else f"Frame {self.cur_frame+1}/{len(self.frames)}")
         self.text(fr, (c.right - 10, c.y + 8), TEXT, font=self.font_b, right=True)
+
+    def _scale_mode_rects(self):
+        c = self.r_canvas
+        y = c.y + 4
+        rb = pygame.Rect(c.x + 150, y, 82, 20)
+        rm = pygame.Rect(c.x + 236, y, 86, 20)
+        return rb, rm
+
+    def _mode_pill(self, rect, label, active):
+        hot = rect.collidepoint(self.mouse)
+        col = ACTIVE if active else (HOVER if hot else PANEL2)
+        pygame.draw.rect(self.screen, col, rect, border_radius=10)
+        pygame.draw.rect(self.screen, ACCENT if active else LINE, rect, 1,
+                         border_radius=10)
+        self.text(label, rect.center, TEXT if active else DIM,
+                  font=self.font_s, center=True)
 
     def _draw_grid(self, clip=None):
         c = clip or self.r_canvas
@@ -2621,7 +3034,8 @@ class App:
             wx, wy, _, _ = model.bone_world(self.project, idx, pose)
             sx, sy = self.w2s(wx, wy)
             sel = (self.sel_kind == "bone" and self.sel_idx == idx)
-            self._socket_marker(int(sx), int(sy), b.name, sel)
+            self._socket_marker(int(sx), int(sy), b.name, sel,
+                                hover=(idx == self._hover_node))
         # 2) materiales con conexion -> etiqueta en su centro
         for idx, sp in enumerate(self.project.sprites):
             conn = getattr(sp, "connection", None)
@@ -2632,8 +3046,13 @@ class App:
             sel = (self.sel_kind == "sprite" and self.sel_idx == idx)
             self._conn_badge(int(sx), int(sy), conn, sel)
 
-    def _socket_marker(self, sx, sy, sid, sel):
+    def _socket_marker(self, sx, sy, sid, sel, hover=False):
         col = (190, 255, 210) if sel else (110, 225, 155)
+        if hover:
+            halo = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+            pygame.draw.circle(halo, (*SELECT, 55), (sx, sy), self.NODE_HIT_R)
+            pygame.draw.circle(halo, (*SELECT, 200), (sx, sy), self.NODE_HIT_R, 2)
+            self.screen.blit(halo, (0, 0))
         pygame.draw.circle(self.screen, col, (sx, sy), 10, 2)
         pygame.draw.circle(self.screen, (18, 30, 24), (sx, sy), 3)
         pygame.draw.circle(self.screen, col, (sx, sy), 1)
@@ -2670,7 +3089,7 @@ class App:
                         pygame.Rect(pill.x + 3, pill.y + 1, 16, 16), col)
         self.text(lbl, (pill.x + 21, pill.y + 3), TEXT, font=self.font_s)
 
-    def _draw_bones(self):
+    def _draw_bones(self, ghost=False):
         pose = self.pose_for()
         for idx, b in enumerate(self.project.bones):
             # los sockets se muestran como PUNTOS (en _draw_socket_overlay), no
@@ -2678,10 +3097,12 @@ class App:
             if getattr(b, "anchor", False) and b.name in model.SOCKETS:
                 continue
             head, tip = self._bone_endpoints_screen(idx, pose)
-            sel = (self.sel_kind == "bone" and self.sel_idx == idx)
-            self._draw_one_bone(head, tip, sel)
+            sel = (not ghost and self.sel_kind == "bone" and self.sel_idx == idx)
+            self._draw_one_bone(head, tip, sel,
+                                hover=(not ghost and idx == self._hover_node),
+                                ghost=ghost)
 
-    def _draw_one_bone(self, head, tip, sel):
+    def _draw_one_bone(self, head, tip, sel, hover=False, ghost=False):
         col = BONE_SEL if sel else BONE
         hx, hy = head
         tx, ty = tip
@@ -2692,10 +3113,25 @@ class App:
         base_l = (hx + nx * r, hy + ny * r)
         base_r = (hx - nx * r, hy - ny * r)
         poly = [base_l, tip, base_r]
+        a_fill, a_line = (26, 70) if ghost else (90, 220)
         body = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
-        pygame.draw.polygon(body, (*col, 90), poly)
-        pygame.draw.polygon(body, (*col, 220), poly, 1)
+        pygame.draw.polygon(body, (*col, a_fill), poly)
+        pygame.draw.polygon(body, (*col, a_line), poly, 1)
+        if ghost:                        # huesos tenues durante la reproduccion
+            pygame.draw.circle(body, (*col, a_line), (int(hx), int(hy)),
+                               int(r) + 1, 2)
+            pygame.draw.circle(body, (*col, a_line), (int(tx), int(ty)), 3)
+            self.screen.blit(body, (0, 0))
+            return
         self.screen.blit(body, (0, 0))
+        # halo de hover en el NODO: muestra el area de agarre y que es movible
+        if hover:
+            halo = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+            pygame.draw.circle(halo, (*SELECT, 55), (int(hx), int(hy)),
+                               self.NODE_HIT_R)
+            pygame.draw.circle(halo, (*SELECT, 200), (int(hx), int(hy)),
+                               self.NODE_HIT_R, 2)
+            self.screen.blit(halo, (0, 0))
         pygame.draw.circle(self.screen, col, (int(hx), int(hy)),
                            int(r) + 1, 2)
         pygame.draw.circle(self.screen, (20, 20, 24), (int(hx), int(hy)), 2)
@@ -2717,7 +3153,7 @@ class App:
                 r = pygame.Rect(bar.x + 4, bar.y + 4 + i * 38, 32, 32)
                 self._paint_tool_btn(r, t, letter)
             return
-        tools = ["select", "bone", "link", "hand"]
+        tools = ["select", "bone", "link", "scale", "move", "hand"]
         bar = pygame.Rect(c.x + 6, c.y + 30, 40, 8 + len(tools) * 40)
         pygame.draw.rect(self.screen, PANEL, bar, border_radius=6)
         pygame.draw.rect(self.screen, LINE, bar, 1, border_radius=6)
@@ -2918,6 +3354,14 @@ class App:
                                 pygame.Rect(cx - 9, cy - 2, 11, 8), 2)
             pygame.draw.ellipse(self.screen, TEXT,
                                 pygame.Rect(cx - 2, cy - 6, 11, 8), 2)
+        elif tool == "scale":  # recuadro + flecha diagonal de expansion
+            pygame.draw.rect(self.screen, TEXT,
+                             pygame.Rect(cx - 8, cy - 8, 11, 11), 1)
+            pygame.draw.line(self.screen, TEXT, (cx - 2, cy - 2), (cx + 8, cy + 8), 2)
+            pygame.draw.polygon(self.screen, TEXT,
+                                [(cx + 8, cy + 8), (cx + 8, cy + 2), (cx + 2, cy + 8)])
+        elif tool == "move":   # cruceta de 4 flechas
+            self._draw_icon("move", rect, TEXT)
         else:                  # hand
             self._draw_icon("hand", rect, TEXT)
         if self.lmb_down and hot:
@@ -3001,7 +3445,8 @@ class App:
                 p, y, sp.name, sel, sp.visible,
                 lambda i=idx: self._sel("sprite", i),
                 lambda i=idx: self._toggle_vis_sprite(i),
-                tag="B" if sp.bone else "", thumb=sp.surface)
+                tag="B" if sp.bone else "", thumb=sp.surface,
+                edit=("rename_sprite", idx))
             if dele:
                 pending_delete = ("sprite", idx)
         self._scrollbar(irect, sc, len(order), rows, maxs)
@@ -3025,7 +3470,8 @@ class App:
             y, dele = self._list_row(
                 p, y, b.name, sel, True,
                 lambda i=idx: self._sel("bone", i), None,
-                indent=depth * 10, tag="ancla" if b.anchor else "")
+                indent=depth * 10, tag="ancla" if b.anchor else "",
+                edit=("rename_bone", idx))
             if dele:
                 pending_delete = ("bone", idx)
         self._scrollbar(brect, sc2, nb, rows2, maxs2)
@@ -3038,9 +3484,11 @@ class App:
                 self.delete_bone(i)
 
     def _list_row(self, p, y, label, sel, visible, on_sel, on_eye,
-                  indent=0, tag="", thumb=None):
-        """Dibuja una fila. Devuelve (nuevo_y, borrar_pedido). El borrado se
-        difiere al que llama para no mutar la lista durante el dibujo."""
+                  indent=0, tag="", thumb=None, edit=None):
+        """Dibuja una fila con iconos (lapiz/ojo/papelera) y renombrado en linea.
+        Devuelve (nuevo_y, borrar_pedido). El borrado se difiere al que llama para
+        no mutar la lista durante el dibujo. `edit` = tupla de edicion p.ej.
+        ("rename_sprite", idx); con doble clic o el lapiz se renombra ahi mismo."""
         h = 30 if thumb is not None else 24
         row = pygame.Rect(p.x + 8, y, p.w - 16, h)
         col = ACTIVE if sel else (HOVER if row.collidepoint(self.mouse) else PANEL2)
@@ -3051,25 +3499,69 @@ class App:
             pygame.draw.rect(self.screen, (26, 28, 34), box)
             self._blit_thumb(thumb, box.inflate(-2, -2))
             tx = box.right + 4
-        self.text(label, (tx, row.centery - 7),
-                  TEXT if visible else DIM, font=self.font_s)
-        if tag:
-            self.text(tag, (row.right - 52, row.centery - 7), ACCENT,
-                      font=self.font_s)
-        xbtn = pygame.Rect(row.right - 22, row.y + 3, 18, 18)
-        delete_requested = self.button(xbtn, "x")
-        eye = None
+
+        # --- botones de la derecha: [lapiz] [ojo] [papelera] ---
+        iy = row.y + (h - 18) // 2
+        bx = row.right - 22
+        xbtn = pygame.Rect(bx, iy, 18, 18)
+        delete_requested = self._icon_button(xbtn, "trash")
         consumed = delete_requested
+        eye = None
         if on_eye is not None:
-            eye = pygame.Rect(row.right - 44, row.y + 3, 18, 18)
-            if self.button(eye, "o" if visible else "-"):
-                on_eye()
-                consumed = True
+            bx -= 21
+            eye = pygame.Rect(bx, iy, 18, 18)
+            if self._icon_button(eye, "eye" if visible else "eye_off"):
+                on_eye(); consumed = True
+        pen = None
+        if edit is not None:
+            bx -= 21
+            pen = pygame.Rect(bx, iy, 18, 18)
+            if self._icon_button(pen, "pencil"):
+                self._begin_row_edit(edit, label); consumed = True
+
+        # --- nombre / campo de edicion en linea ---
+        editing_this = (edit is not None and self.editing == edit)
+        if editing_this:
+            field = pygame.Rect(tx, row.centery - 9, max(20, bx - tx - 6), 18)
+            pygame.draw.rect(self.screen, (30, 32, 40), field, border_radius=3)
+            pygame.draw.rect(self.screen, ACCENT, field, 1, border_radius=3)
+            self._draw_edit_buf(field.x + 4, field.centery - 7)
+        else:
+            if tag:
+                self.text(tag, (bx - 6, row.centery - 7), ACCENT,
+                          font=self.font_s, right=True)
+            self.text(label, (tx, row.centery - 7),
+                      TEXT if visible else DIM, font=self.font_s)
+
+        over_btn = (xbtn.collidepoint(self.mouse)
+                    or (eye and eye.collidepoint(self.mouse))
+                    or (pen and pen.collidepoint(self.mouse)))
         if (self.lmb_down and row.collidepoint(self.mouse) and not consumed
-                and not xbtn.collidepoint(self.mouse)
-                and not (eye and eye.collidepoint(self.mouse))):
-            on_sel()
+                and not over_btn and not editing_this):
+            now = pygame.time.get_ticks()
+            dbl = (edit is not None and self._last_row_click
+                   and self._last_row_click[0] == edit
+                   and now - self._last_row_click[1] < 350)
+            if dbl:                                  # doble clic -> renombrar
+                self._begin_row_edit(edit, label)
+                self._last_row_click = None
+            else:
+                on_sel()
+                self._last_row_click = (edit, now)
+        # hover sobre un material (con miniatura): preview grande del contenido
+        if (thumb is not None and row.collidepoint(self.mouse) and not over_btn
+                and not self.lmb_held and not editing_this):
+            self._preview = (thumb, label, self.r_left.right + 8, row.y)
         return y + h + 2, delete_requested
+
+    def _begin_row_edit(self, edit, label):
+        """Empieza a renombrar una fila (confirma cualquier renombrado en curso)."""
+        if (self.editing and self.editing != edit
+                and isinstance(self.editing[0], str)
+                and self.editing[0].startswith("rename_")):
+            self._commit_rename()
+        self.editing = edit
+        self.edit_buf = label
 
     def _list_scroll(self, attr, rect, count, row_h):
         """Aplica la rueda a una lista cuando el mouse esta encima y devuelve
@@ -3327,9 +3819,7 @@ class App:
         editing = (self.editing and self.editing[0] == "rename_drawing"
                    and self.editing[1] == i)
         if editing:
-            caret = "|" if (pygame.time.get_ticks() // 400) % 2 else ""
-            self.text(self.edit_buf + caret, (row.x + 32, row.centery - 7),
-                      TEXT, font=self.font_s)
+            self._draw_edit_buf(row.x + 32, row.centery - 7)
         else:
             self.text(d.name, (row.x + 32, row.centery - 7), TEXT, font=self.font_s)
         ren = pygame.Rect(row.right - 44, row.y + 6, 18, 18)
@@ -3356,9 +3846,7 @@ class App:
         editing = (self.editing and self.editing[0] == "rename_layer"
                    and self.editing[1] == i)
         if editing:
-            caret = "|" if (pygame.time.get_ticks() // 400) % 2 else ""
-            self.text(self.edit_buf + caret, (row.x + 28, row.centery - 7),
-                      TEXT, font=self.font_s)
+            self._draw_edit_buf(row.x + 28, row.centery - 7)
         else:
             self.text(lay.name, (row.x + 28, row.centery - 7),
                       TEXT if lay.visible else DIM, font=self.font_s)
@@ -3371,11 +3859,46 @@ class App:
         if self._icon_button(dn, "down"):
             self.layer_move(i, -1); consumed = True
         consumed = consumed or del_req
+        over_btn = any(r.collidepoint(self.mouse) for r in (eye, dele, up, dn))
         if (self.lmb_down and row.collidepoint(self.mouse) and not consumed
-                and not any(r.collidepoint(self.mouse)
-                            for r in (eye, dele, up, dn))):
+                and not over_btn):
             self.layer_select(i)
+        # hover (sin arrastrar, fuera de botones): previsualiza el contenido
+        if (row.collidepoint(self.mouse) and not over_btn and not self.lmb_held
+                and not editing):
+            self._preview = (lay.surface, lay.name, self.r_left.right + 8, row.y)
         return del_req
+
+    def _draw_preview(self, surf, label, anchor_x, row_y):
+        """Ventana flotante (al lado del panel) con el contenido de una capa o
+        material. Se dibuja al final del frame, ENCIMA de todo, y se mantiene
+        completa dentro de la pantalla."""
+        if surf is None or not all(surf.get_size()):
+            return
+        w, h = surf.get_size()
+        iw, ih = (lambda sc: (max(1, int(w * sc)), max(1, int(h * sc))))(
+            min(200.0 / w, 240.0 / h))
+        pad = 8
+        box = pygame.Rect(anchor_x, 0, iw + pad * 2, ih + pad * 2 + 18)
+        # si no cabe a la derecha del panel, ponlo a la IZQUIERDA del mouse
+        if box.right > self.screen.get_width() - 4:
+            box.x = max(4, self.r_left.right - box.w - 8)
+        box.y = max(self.r_top.bottom + 4,
+                    min(row_y - 8, self.screen.get_height() - box.h - 4))
+        shadow = pygame.Surface(box.inflate(8, 8).size, pygame.SRCALPHA)
+        shadow.fill((0, 0, 0, 90))
+        self.screen.blit(shadow, box.inflate(8, 8).topleft)
+        pygame.draw.rect(self.screen, PANEL, box, border_radius=6)
+        pygame.draw.rect(self.screen, ACCENT, box, 1, border_radius=6)
+        img_rect = pygame.Rect(box.x + pad, box.y + pad, iw, ih)
+        self._draw_checker(img_rect)
+        if surf.get_bounding_rect(min_alpha=1).width == 0:
+            self.text("(vacio)", img_rect.center, DIM, font=self.font_s,
+                      center=True)
+        else:
+            self.screen.blit(pygame.transform.scale(surf, (iw, ih)),
+                             img_rect.topleft)
+        self.text(label, (box.x + pad, box.bottom - 16), TEXT, font=self.font_s)
 
     def _sv_surface(self, w, h):
         key = (round(self.paint.hue, 3), w, h)
@@ -3628,8 +4151,7 @@ class App:
             box = pygame.Rect(x, y - 2, w, 22)
             pygame.draw.rect(self.screen, (24, 26, 32), box, border_radius=3)
             pygame.draw.rect(self.screen, ACCENT, box, 1, border_radius=3)
-            caret = "|" if (pygame.time.get_ticks() // 400) % 2 else ""
-            self.text(self.edit_buf + caret, (x + 5, y + 2), TEXT, font=self.font_s)
+            self._draw_edit_buf(x + 5, y + 2)
         else:
             self.text(name, (x, y), TEXT, font=self.font_b)
             if self.button(pygame.Rect(p.right - 90, y - 2, 80, 20), "Renombrar"):
@@ -3900,9 +4422,7 @@ class App:
                                          else PANEL2)
             pygame.draw.rect(self.screen, col, tab, border_radius=3)
             if editing:
-                caret = "|" if (pygame.time.get_ticks() // 400) % 2 else ""
-                self.text(self.edit_buf + caret, (tab.x + 6, tab.centery - 7),
-                          TEXT, font=self.font_s)
+                self._draw_edit_buf(tab.x + 6, tab.centery - 7)
             else:
                 self.text(txt, (tab.x + 6, tab.centery - 7),
                           TEXT if active else DIM, font=self.font_s)
@@ -3912,10 +4432,13 @@ class App:
         if self.button(pygame.Rect(tx, ty, 26, 20), "+"):
             self.add_clip()
         tx += 30
-        if len(self.project.clips) > 1:
-            if self._icon_button(pygame.Rect(tx, ty, 24, 20), "trash"):
-                self.delete_clip(self.cur_clip)
-            tx += 28
+        # duplicar la animacion activa (copia entera -> variante)
+        if self.clip and self._icon_button(pygame.Rect(tx, ty, 24, 20), "duplicate"):
+            self.duplicate_clip()
+        tx += 28
+        if self._icon_button(pygame.Rect(tx, ty, 24, 20), "trash"):
+            self.delete_clip(self.cur_clip)         # borrar incluso la ultima
+        tx += 28
         # tamano de frame de ESTA animacion (atacar puede necesitar mas ancho)
         if self.clip:
             self.text("Frame", (tx, ty + 4), DIM, font=self.font_s)
@@ -4035,12 +4558,20 @@ class App:
             "   Tambien sirve 'Sigue al hueso < >' en PROPIEDADES. La linea del",
             "   sprite seleccionado a su hueso confirma el vinculo.",
             "5) Mueve/rota huesos y pulsa Capturar (K) por frame. Exporta PNG.",
+            "6) ESCALAR (E): arrastra horizontal para reescalar; afecta a TODAS las",
+            "   animaciones ya hechas. 2 modos (toggle arriba o re-pulsar E):",
+            "   ESQUELETO = reescala el rig entero (huesos + arte que cuelga);",
+            "   MATERIALES = solo agranda/achica el ARTE, sin tocar los huesos.",
+            "7) MOVER (M): arrastra para reubicar TODO el personaje a la vez en",
+            "   todas las animaciones (sin descuadrar la altura de los frames).",
+            "   Util tras escalar, si la figura se sale del recuadro.",
             "",
-            "V seleccion  B hueso  C enlace  H mano (paneo)  K capturar  Espacio play",
+            "V seleccion  B hueso  C enlace  E escalar  M mover  H mano  K capturar",
             "Supr borrar   F2 renombrar (material/hueso/animacion)   Rueda zoom",
             "Ctrl+C / Ctrl+V / Ctrl+D: copiar / pegar / duplicar material o hueso.",
-            "Animaciones = pestanas del timeline. '+' crea una nueva animacion",
-            "   basada en el frame seleccionado (o el 1o); clic en la activa renombra.",
+            "Animaciones = pestanas del timeline. '+' crea una nueva basada en el",
+            "   frame seleccionado (o el 1o); el boton DUPLICAR (al lado) copia la",
+            "   animacion activa ENTERA como variante; clic en la activa renombra.",
             "Ctrl+S guardar  Ctrl+Shift+S guardar como  Ctrl+O abrir",
             "Ctrl+E exportar  Ctrl+Z deshacer  Ctrl+Y rehacer",
             "",

@@ -70,7 +70,12 @@ def rig_profile(project):
     n = len(bones)
     children = {i: [] for i in range(n)}
     roots = []
+    # los SOCKETS (anchors: ojos/pelo/manos/...) cuelgan del rig pero NO son
+    # estructura: ignorarlos para detectar torso/cabeza/brazos/piernas, si no la
+    # cabeza con sockets deja de verse "sin hijos" y no se detecta.
     for i, b in enumerate(bones):
+        if getattr(b, "anchor", False):
+            continue
         if b.parent is None or b.parent < 0:
             roots.append(i)
         else:
