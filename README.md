@@ -40,7 +40,9 @@ El editor con un proyecto real (esqueleto con huesos jerárquicos, sockets de
 | ![Animación](docs/animation.gif) | ![Spritesheet](docs/spritesheet.png) |
 
 A la izquierda, la animación reproduciéndose con **Play**; a la derecha, la
-hoja de tiles PNG que genera *Exportar hoja* (9 frames de 64×128).
+hoja de tiles PNG que genera *Exportar hoja* (ciclo de caminado de 12 frames).
+Es el **cuerpo base** actual del personaje de TrashGame; la cara, el pelo y la
+ropa son capas aparte que el juego compone encima.
 
 ## Dos modos: Animar y Pintar (`Tab`)
 
