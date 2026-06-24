@@ -10,13 +10,25 @@ pero con la lista de sprites vacia (solo rig + clips).
 from __future__ import annotations
 import math
 import os
+import sys
 
 from . import model, config
 
 # carpeta de plantillas del usuario (junto a la config)
 TEMPLATES_DIR = os.path.join(config.CONFIG_DIR, "templates")
+
+
+def _builtin_base():
+    """Carpeta del paquete. En el ejecutable de PyInstaller los datos se
+    extraen a sys._MEIPASS/pixelbones; al correr desde fuente, junto a este
+    archivo. Sin esto, el modo fantasma no halla el body estandar en el build."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return os.path.join(sys._MEIPASS, "pixelbones")
+    return os.path.dirname(__file__)
+
+
 # plantillas que vienen con el programa
-BUILTIN_DIR = os.path.join(os.path.dirname(__file__), "templates")
+BUILTIN_DIR = os.path.join(_builtin_base(), "templates")
 # cuerpo estandar CON arte (referencia/fantasma de los items: ropa/caracteristica)
 STANDARD_BODY = os.path.join(BUILTIN_DIR, "_standard_body.pbproj")
 

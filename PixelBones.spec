@@ -7,7 +7,9 @@ a = Analysis(
     ['main.py'],
     pathex=['.'],
     binaries=[],
-    datas=[],
+    # Empacar las plantillas builtin (body estandar/humano) que usa el modo
+    # fantasma; sin esto, en el ejecutable no hay body de guia para los items.
+    datas=[('pixelbones/templates', 'pixelbones/templates')],
     hiddenimports=[],
     hookspath=[],
     runtime_hooks=[],
