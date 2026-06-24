@@ -30,10 +30,10 @@ no necesitas Python ni instalar dependencias:
 
 ## Demo
 
-El editor con un proyecto real (esqueleto, sprites vinculados, máscara de
-rotación y línea de tiempo con los frames):
+El editor con un proyecto real (esqueleto con huesos jerárquicos, sockets de
+**Conexiones**, panel de propiedades y línea de tiempo con los frames y clips):
 
-![Editor de PixelBones](docs/editor.png)
+![Editor de PixelBones](docs/screenshots/editor_animar.png)
 
 | Animación (reproducida) | Spritesheet exportado |
 |---|---|
@@ -54,6 +54,8 @@ no necesitas otra herramienta para dibujar las piezas.
   editando el dibujo ya no afecta al material). Para retocar un material que ya
   está en la escena, abre sus Propiedades y usa **"Editar en Pintar (copia)"**.
   `Tab` alterna entre ambos modos.
+
+![Modo Pintar de PixelBones: panel de dibujos y capas, barra de herramientas estilo Pixelorama, y panel de color/paleta con Aplanar a asset/PNG](docs/screenshots/paint_mode.png)
 
 Herramientas de Pintar (teclas iguales a Pixelorama):
 
