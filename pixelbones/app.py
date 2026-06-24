@@ -367,7 +367,9 @@ class App:
         self.pcx, self.pcy = w / 2.0, h / 2.0
         c = getattr(self, "r_canvas", None)
         if c and c.w and c.h and w and h:
-            self.pzoom = max(1.0, min(24.0, min((c.w - 60) / w, (c.h - 60) / h)))
+            # min 0.05: permite ALEJAR para que un lienzo grande (p.ej. 1700x1000)
+            # entre completo en la vista (antes el tope era 1.0 y se salia).
+            self.pzoom = max(0.05, min(24.0, min((c.w - 60) / w, (c.h - 60) / h)))
 
     # -- edicion de texto inline -----------------------------------------
     def rename_selected(self):
@@ -2660,7 +2662,8 @@ class App:
                                               self.paint.brush + (1 if self.wheel > 0 else -1)))
             else:
                 old = self.s2pc(*self.mouse)
-                self.pzoom = max(1.0, min(40.0, self.pzoom * (1.1 ** self.wheel)))
+                # min 0.05: permite alejar para ver lienzos grandes completos.
+                self.pzoom = max(0.05, min(40.0, self.pzoom * (1.1 ** self.wheel)))
                 new = self.s2pc(*self.mouse)
                 self.pcx += old[0] - new[0]
                 self.pcy += old[1] - new[1]
