@@ -211,7 +211,7 @@ def pack_clips_sheet(project, sprites_filter=None, box_override=None):
     return sheet
 
 
-def build_meta(project, box_override=None, connection=None):
+def build_meta(project, box_override=None, connection=None, conn_offset=None):
     """Metadata de la hoja para el juego (sidecar JSON).
 
     Incluye, por animacion (fila) y por frame, el transform de los huesos
@@ -230,6 +230,11 @@ def build_meta(project, box_override=None, connection=None):
     meta = {"frame_w": fw, "frame_h": fh, "rows": []}
     if connection:
         meta["connection"] = {"socket": connection, "pivot": "center"}
+        # offset (px) del CENTRO dibujado respecto al socket: el juego coloca la
+        # pieza DONDE se dibujo (WYSIWYG) y la hace seguir al hueso por frame.
+        if conn_offset:
+            meta["connection"]["offset"] = [round(conn_offset[0], 2),
+                                            round(conn_offset[1], 2)]
     for c in (project.clips or []):
         bx, by, cw, ch = box_override if box_override else clip_box(project, c)
         frames = c.frames or [None]
@@ -253,15 +258,17 @@ def build_meta(project, box_override=None, connection=None):
     return meta
 
 
-def export_meta(project, path, box_override=None, connection=None):
+def export_meta(project, path, box_override=None, connection=None,
+                conn_offset=None):
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump(build_meta(project, box_override, connection),
+        json.dump(build_meta(project, box_override, connection, conn_offset),
                   fh, indent=2, ensure_ascii=False)
     return path
 
 
-def export_composite(project, out_path, box_override=None):
-    sheet = pack_clips_sheet(project, box_override=box_override)
+def export_composite(project, out_path, box_override=None, sprites_filter=None):
+    sheet = pack_clips_sheet(project, sprites_filter=sprites_filter,
+                             box_override=box_override)
     pygame.image.save(sheet, out_path)
     return sheet.get_size()
 

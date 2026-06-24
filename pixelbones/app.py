@@ -61,6 +61,10 @@ class App:
 
         self.project = model.Project()
         self.ref_project = None        # body de referencia (fantasma) de un item
+        self.shirt_idx = -1            # camisa de guia (cargable): -1 = ninguna
+        self._shirt_cache = {}         # name -> (surface, ox, oy)
+        self.ghost_op = 1.0            # opacidad del fantasma (0..1; 1 = la maxima)
+        self.show_z = False            # overlay de z-index de las partes del body
         self.sel_kind = None          # "sprite" | "bone" | None
         self.sel_idx = -1
         self.cur_clip = 0             # animacion activa (project.clips)
@@ -292,7 +296,7 @@ class App:
         pygame.K_p: "pencil", pygame.K_e: "eraser", pygame.K_c: "shade",
         pygame.K_b: "bucket", pygame.K_o: "eyedropper", pygame.K_h: "hand",
         pygame.K_l: "line", pygame.K_j: "curve", pygame.K_w: "wand",
-        pygame.K_s: "select", pygame.K_m: "move",
+        pygame.K_s: "select", pygame.K_m: "move", pygame.K_k: "scale",
     }
 
     def _hotkey_paint(self, key):
@@ -454,6 +458,9 @@ class App:
             elif idx == "export_crop_h":
                 h = int(round(val))
                 self.project.export_crop_h = h if h > 0 else None
+            elif idx == "clothes_z":
+                z = int(round(val))
+                self.project.clothes_z = z if z > 0 else None
             else:
                 setattr(self.project, idx, val)
             self._thumbs_dirty = True
@@ -1629,7 +1636,7 @@ class App:
     # ====================================================================
     @property
     def is_item(self):
-        return self.project.kind in ("ropa", "caracteristica")
+        return self.project.kind in ("ropa", "caracteristica", "cargable")
 
     def new_project(self):
         # asistente: primero pregunta si es un BODY o un ITEM
@@ -1663,8 +1670,10 @@ class App:
             self.new_blank_project()
             self.status = "No hay plantilla estandar; proyecto en blanco."
             return
-        self.load_template(path)          # carga rig+anims, conserva dibujos
+        self.load_template(path)          # carga rig+anims del estandar
         self.project.kind = "body"
+        self.project.drawings = []        # taller LIMPIO (proyecto nuevo)
+        self.draw_idx = -1
         self.status = ("Body nuevo desde el ESTANDAR. Dibuja tu arte (Pintar) y "
                        "asignalo a los huesos.")
 
@@ -1678,17 +1687,29 @@ class App:
             self.status = ("No hay cuerpo estandar. Crea un body y guardalo como "
                            "estandar, o configura 'standard_body'.")
             return
-        keep = self.project.drawings           # conserva dibujos del taller
-        self.project = model.Project()
+        self.project = model.Project()         # taller LIMPIO (proyecto nuevo)
         self.project.kind = kind
         self.project.ref_body = "@standard"
-        self.project.drawings = keep
         self._reset_for_new()
         self._attach_ref_body()
-        lbl = "Ropa" if kind == "ropa" else "Caracteristica"
-        self.status = (f"{lbl} nueva sobre el body estandar (fantasma). " +
-                       ("Dibuja la prenda y enlazala a los huesos." if kind == "ropa"
-                        else "Dibuja la pieza y asignale una conexion (socket)."))
+        if kind == "cargable":
+            # un cargable SIEMPRE tiene 2 frames: 0 = BRAZOS/correas (van DELANTE
+            # del jugador), 1 = MALETIN (va DETRAS del body). Al exportar, pixelBones
+            # agrega solo un 3er frame = combinacion (el icono del item).
+            c = self.project.clips[0]
+            c.name = "cargable"
+            c.frames = [model.Frame("brazos"), model.Frame("maletin")]
+            self.cur_frame = 0
+            self.sync_working()
+        lbl = {"ropa": "Ropa", "caracteristica": "Caracteristica",
+               "cargable": "Cargable"}.get(kind, kind)
+        tip = {"ropa": "Dibuja la prenda y enlazala a los huesos.",
+               "caracteristica": "Dibuja la pieza y asignale una conexion (socket).",
+               "cargable": ("Frame 1 = BRAZOS/correas (delante), frame 2 = MALETIN "
+                            "(detras). 'Preview en body' para verlo; el icono lo "
+                            "arma pixelBones al exportar.")
+               }.get(kind, "")
+        self.status = f"{lbl} nuevo sobre el body estandar (fantasma). {tip}"
 
     # ---- referencia (body fantasma) ------------------------------------
     def _resolve_ref(self, ref):
@@ -1729,6 +1750,148 @@ class App:
         # caracteristica conserva sus propios bones (vacio) y clips (pocos frames)
         self.sync_working()
         self._thumbs_dirty = True
+
+    def _cargable_preview_surface(self, scale=3):
+        """Composicion de como queda el CARGABLE puesto: el MALETIN (frame 1) va
+        DETRAS del body y los BRAZOS/correas (frame 0) DELANTE. Para el preview."""
+        rp = self.ref_project
+        pr = self.project
+        if rp is None or not pr.clips or not pr.clips[0].frames:
+            return None
+        frames = pr.clips[0].frames
+        ibox = (pr.box_x, pr.box_y, pr.tile_w, pr.tile_h)
+        bbox = (rp.box_x, rp.box_y, rp.tile_w, rp.tile_h)
+        brazos = render.render_tile(pr, frames[0], None, ibox)
+        maletin = render.render_tile(pr, frames[1], None, ibox) if len(frames) > 1 else None
+        body = render.render_tile(rp, self._ref_idle_frame(), None, bbox)
+        w, h = int(round(pr.tile_w)), int(round(pr.tile_h))
+        canvas = pygame.Surface((w, h), pygame.SRCALPHA)
+        if maletin:
+            canvas.blit(maletin, (0, 0))      # el maletin, DETRAS del body
+        if body:
+            canvas.blit(body, (0, 0))         # el cuerpo
+        ov = self._shirt_overlay()            # camisa de guia, SOBRE el cuerpo
+        if ov is not None:
+            frame, ox, oy = ov
+            canvas.blit(frame, (-rp.box_x - ox, -rp.box_y - oy))
+        if brazos:
+            canvas.blit(brazos, (0, 0))       # los brazos/correas, DELANTE
+        s = max(1, int(scale))
+        return pygame.transform.scale(canvas, (w * s, h * s))
+
+    # -- camisa de guia para alinear el cargable (usa las YA exportadas al juego) --
+    def _list_shirts(self):
+        """Camisas exportadas al juego: <root>/<assets>/characters/shirts/<v>/<v>.png
+        (+ .json). Lista de (nombre, png, json). Vacia si no hay project_root."""
+        if not self.project_root:
+            return []
+        base = os.path.join(self.project_root, self.assets_dir,
+                            "characters", "shirts")
+        out = []
+        if os.path.isdir(base):
+            for name in sorted(os.listdir(base)):
+                d = os.path.join(base, name)
+                png = os.path.join(d, name + ".png")
+                js = os.path.join(d, name + ".json")
+                if os.path.isfile(png) and os.path.isfile(js):
+                    out.append((name, png, js))
+        return out
+
+    def _shirt_overlay(self):
+        """(surface, ox, oy) del frame de reposo de la camisa elegida, o None.
+        ox/oy = origen exportado (pixel del mundo (0,0) en el frame), para alinear
+        igual que el body. Cacheado por nombre."""
+        shirts = self._list_shirts()
+        if not (0 <= self.shirt_idx < len(shirts)):
+            return None
+        name, png, js = shirts[self.shirt_idx]
+        if name in self._shirt_cache:
+            return self._shirt_cache[name]
+        try:
+            import json
+            meta = json.load(open(js, encoding="utf-8"))
+            sheet = pygame.image.load(png).convert_alpha()
+        except Exception as e:
+            self.status = f"No se pudo cargar la camisa: {e}"
+            self._shirt_cache[name] = None
+            return None
+        rows = meta.get("rows", [])
+        # fila 'reposo' (o idle/caminando/primera) y su y dentro de la hoja packed
+        pick, y, yc = None, 0, 0
+        for r in rows:
+            nm = r.get("name", "").lower()
+            if pick is None and nm in ("reposo", "idle"):
+                pick, yc = r, y
+            y += int(round(r.get("frame_h", 0)))
+        if pick is None:
+            y = 0
+            for r in rows:
+                if "camin" in r.get("name", "").lower():
+                    pick, yc = r, y
+                    break
+                y += int(round(r.get("frame_h", 0)))
+        if pick is None and rows:
+            pick, yc = rows[0], 0
+        if pick is None:
+            self._shirt_cache[name] = None
+            return None
+        fw, fh = int(round(pick["frame_w"])), int(round(pick["frame_h"]))
+        try:
+            frame = sheet.subsurface(pygame.Rect(0, yc, fw, fh)).copy()
+        except ValueError:
+            self._shirt_cache[name] = None
+            return None
+        # banda _frente (la manga que va SOBRE el brazo): misma maqueta, encima.
+        fpng = os.path.splitext(png)[0] + "_frente.png"
+        if os.path.isfile(fpng):
+            try:
+                fsheet = pygame.image.load(fpng).convert_alpha()
+                frame.blit(fsheet.subsurface(pygame.Rect(0, yc, fw, fh)), (0, 0))
+            except (ValueError, pygame.error):
+                pass
+        ox, oy = pick.get("origin", [0, 0])
+        data = (frame, float(ox), float(oy))
+        self._shirt_cache[name] = data
+        return data
+
+    def _cycle_shirt(self):
+        n = len(self._list_shirts())
+        self.shirt_idx = -1 if n == 0 else ((self.shirt_idx + 2) % (n + 1)) - 1
+
+    def _toggle_shirt(self):
+        """Switch quitar/poner camisa, recordando la ultima elegida."""
+        shirts = self._list_shirts()
+        if not shirts:
+            return
+        if self.shirt_idx >= 0:
+            self._shirt_prev = self.shirt_idx
+            self.shirt_idx = -1
+        else:
+            p = getattr(self, "_shirt_prev", 0)
+            self.shirt_idx = p if 0 <= p < len(shirts) else 0
+
+    def _shirt_label(self):
+        shirts = self._list_shirts()
+        if not shirts:
+            return "Camisa: (ninguna exportada)"
+        if 0 <= self.shirt_idx < len(shirts):
+            return f"Camisa: {shirts[self.shirt_idx][0]}"
+        return "Camisa: (sin camisa)"
+
+    def _draw_shirt_overlay(self):
+        """Dibuja la camisa de guia sobre el body fantasma en el LIENZO (semi-
+        transparente), alineada por el origen exportado (mundo (0,0))."""
+        ov = self._shirt_overlay()
+        if ov is None:
+            return
+        frame, ox, oy = ov
+        if self.zoom != 1.0:
+            frame = pygame.transform.scale(
+                frame, (max(1, int(frame.get_width() * self.zoom)),
+                        max(1, int(frame.get_height() * self.zoom))))
+        frame = frame.copy()
+        frame.fill((255, 255, 255, self._gop(130)), special_flags=pygame.BLEND_RGBA_MULT)
+        self.screen.blit(frame, self.w2s(-ox, -oy))
 
     def _ref_idle_frame(self):
         """Frame 'guia' del body de referencia (reposo si existe)."""
@@ -1811,10 +1974,11 @@ class App:
             self.status = f"Error al guardar: {e}"
 
     def _save_project_to(self, path):
-        """Guarda el proyecto. En un ITEM, el rig y las animaciones son del body
-        REFERENCIADO: no se persisten (se re-vinculan al abrir)."""
+        """Guarda el proyecto. SOLO la ROPA toma rig+animaciones del body
+        REFERENCIADO (no se persisten, se re-vinculan al abrir). Caracteristica y
+        cargable tienen sus PROPIOS huesos y frames: hay que guardarlos."""
         pr = self.project
-        if self.is_item:
+        if pr.kind == "ropa":
             bones, clips = pr.bones, pr.clips
             pr.bones, pr.clips = [], []
             try:
@@ -1835,21 +1999,36 @@ class App:
         # frame -> ahorra recursos. BODY: expandir para no recortar nunca.
         box_override = None
         conn = None
+        conn_offset = None
         warn = ""
         if self.is_item:
             nfit = 0
-            conn = render.part_connection(pr)
-            if not conn:
-                warn += "  ⚠ SIN conexion (el juego no sabra donde colocarla)."
             hid = [s.name for s in pr.sprites if not s.visible]
             if hid:
-                warn += f"  ⚠ ocultos: {', '.join(hid)} (no se exportan)."
+                warn += f"  ⚠ ocultos globalmente: {', '.join(hid)}."
+            if pr.kind == "cargable" and len(pr.clips[0].frames) != 2:
+                warn += "  ⚠ un cargable debe tener 2 frames (atras/adelante)."
             if pr.kind == "caracteristica":
+                conn = render.part_connection(pr)
+                if not conn:
+                    warn += "  ⚠ SIN conexion (el juego no sabra donde colocarla)."
                 box_override = render.content_box(pr, margin=1)
                 if box_override is None:
                     self.status = ("Nada visible para exportar (¿materiales "
                                    "ocultos?).")
                     return
+                # WYSIWYG: offset del centro DIBUJADO respecto al socket del body,
+                # para que en el juego quede DONDE lo dibujaste (no centrado en el
+                # socket) y siga al hueso por frame.
+                if conn and self.ref_project is not None:
+                    sj = self.ref_project.bone_by_name(conn)
+                    if sj >= 0:
+                        ccx = box_override[0] + box_override[2] / 2.0
+                        ccy = box_override[1] + box_override[3] / 2.0
+                        pfr = model.pose_for_frame(self.ref_project,
+                                                   self._ref_idle_frame())
+                        sw = model.bone_world(self.ref_project, sj, pfr)
+                        conn_offset = (ccx - sw[0], ccy - sw[1])
         else:
             nfit = self.ensure_clips_fit()        # nunca recortar (body)
         auto = self._mirror_path(".png")          # espejo art-src -> assets
@@ -1860,20 +2039,44 @@ class App:
             path = dialogs.save_png_as()
             if not path:
                 return
+        # CARGABLE: pixelBones agrega un 3er frame de cortesia = COMBINACION
+        # (brazos + maletin juntos) -> el icono del item en inventario/recogibles.
+        combo_added = False
+        if pr.kind == "cargable" and pr.clips and len(pr.clips[0].frames) == 2:
+            combo = model.Frame("combo")          # hidden vacio -> muestra todo
+            pr.clips[0].frames.append(combo)
+            combo_added = True
+        # Banda DELANTE-de-la-ropa: las partes con z (body) o el z del hueso que
+        # siguen (ropa) por encima de clothes_z se exportan a <name>_frente.png.
+        front_ids = self._front_band_ids(pr)
+        main_filter = (set(range(len(pr.sprites))) - front_ids) if front_ids else None
         try:
-            sz = render.export_composite(pr, path, box_override)
+            sz = render.export_composite(pr, path, box_override,
+                                         sprites_filter=main_filter)
             render.export_meta(pr, os.path.splitext(path)[0] + ".json",
-                               box_override=box_override, connection=conn)
+                               box_override=box_override, connection=conn,
+                               conn_offset=conn_offset)
+            if front_ids:                          # banda del frente (sobre ropa)
+                fpath = os.path.splitext(path)[0] + "_frente.png"
+                render.export_composite(pr, fpath, box_override,
+                                        sprites_filter=front_ids)
             shown = (os.path.relpath(path, self.project_root)
                      if self.project_root and auto else os.path.basename(path))
             extra = f" · ajuste {nfit} anim." if nfit else ""
             if conn:
                 extra += f" · conexion '{conn}'"
+            if front_ids:
+                extra += f" · +banda _frente ({len(front_ids)} partes)"
+            if combo_added:
+                extra += " · +1 frame combo (icono)"
             self.status = (f"Exportado {sz[0]}x{sz[1]} "
                            f"({len(pr.clips)} fila/s) -> {shown} + .json"
                            + extra + warn)
         except Exception as e:
             self.status = f"Error export: {e}"
+        finally:
+            if combo_added:                       # el combo es temporal del export
+                pr.clips[0].frames.pop()
 
     def export_layers(self):
         if not self.project.sprites:
@@ -2113,6 +2316,8 @@ class App:
                 want = pygame.SYSTEM_CURSOR_HAND
             elif self.ptool == "move":
                 want = pygame.SYSTEM_CURSOR_SIZEALL
+            elif self.ptool == "scale":
+                want = pygame.SYSTEM_CURSOR_SIZEWE
             else:
                 want = pygame.SYSTEM_CURSOR_CROSSHAIR
         elif self.mode == "animate" and over and self.tool == "hand":
@@ -2509,6 +2714,21 @@ class App:
             self.drag = {"paint": True, "mode": "sel_move", "float": flo,
                          "start": (px, py)}
             return
+        if t == "scale":
+            # escalar el contenido de la CAPA: arrastra horizontal (derecha = mas
+            # grande). Reescala lo dibujado desde su centro, sin perder calidad de
+            # pixel (nearest). Re-escala desde el original en cada paso.
+            surf = layer.surface
+            bb = surf.get_bounding_rect(min_alpha=1)
+            if bb.width == 0 or bb.height == 0:
+                self.status = "La capa esta vacia (nada que escalar)."
+                return
+            self._paint_push_undo(sp, layer)
+            self.drag = {"paint": True, "mode": "lscale",
+                         "content": surf.subsurface(bb).copy(),
+                         "center": bb.center, "size": surf.get_size(),
+                         "sx": self.mouse[0]}
+            return
         if t == "select":
             W, H = layer.surface.get_size()
             mods = pygame.key.get_mods()
@@ -2613,6 +2833,22 @@ class App:
             self._stroke_to(layer, lx, ly, px, py)
             self.drag["last"] = (px, py)
             self._after_paint(sp)
+        elif m == "lscale":
+            sp, layer = self._active_layer()
+            if layer is None:
+                return
+            f = max(0.1, min(8.0, 1.0 + (self.mouse[0] - self.drag["sx"]) * 0.01))
+            content = self.drag["content"]
+            nw = max(1, int(round(content.get_width() * f)))
+            nh = max(1, int(round(content.get_height() * f)))
+            scaled = pygame.transform.scale(content, (nw, nh))   # nearest (pixel)
+            W, H = self.drag["size"]
+            new = pygame.Surface((W, H), pygame.SRCALPHA)
+            cx, cy = self.drag["center"]
+            new.blit(scaled, (int(round(cx - nw / 2)), int(round(cy - nh / 2))))
+            layer.surface = new
+            self._after_paint(sp)
+            self.status = f"Escalar capa x{f:.2f}"
         elif m == "shape":
             self._shape_drag()
 
@@ -2944,6 +3180,28 @@ class App:
                   font=self.font_s, center=True)
         return enabled and self.lmb_down and hot
 
+    def _switch(self, rect, on, label=""):
+        """Toggle tipo pastilla (iOS): etiqueta a la izquierda + pastilla con
+        knob deslizante a la derecha. Devuelve True si se hizo click."""
+        hot = rect.collidepoint(self.mouse)
+        if label:
+            self.text(label, (rect.x, rect.centery - 7), TEXT, font=self.font_s)
+        pw, ph = 46, 22
+        track = pygame.Rect(rect.right - pw, rect.centery - ph // 2, pw, ph)
+        base = (95, 185, 120) if on else (70, 73, 84)
+        col = tuple(min(255, c + 20) for c in base) if hot else base
+        pygame.draw.rect(self.screen, col, track, border_radius=ph // 2)
+        pygame.draw.rect(self.screen, LINE, track, 1, border_radius=ph // 2)
+        self.text("SI" if on else "NO",
+                  (track.x + 13 if on else track.right - 13, track.centery),
+                  (252, 254, 255) if on else DIM, font=self.font_s, center=True)
+        kr = ph - 6
+        kx = (track.right - kr - 3) if on else (track.x + 3)
+        knob = pygame.Rect(kx, track.y + 3, kr, kr)
+        pygame.draw.ellipse(self.screen, (245, 247, 250), knob)
+        pygame.draw.ellipse(self.screen, (205, 209, 218), knob, 1)
+        return self.lmb_down and hot
+
     def scrub(self, sid, rect, value, step, fmt="{:.0f}"):
         hot = rect.collidepoint(self.mouse)
         active = self.active_scrub == sid
@@ -2963,6 +3221,34 @@ class App:
             self.scrub_x0 = self.mouse[0]
             self.scrub_v0 = value
             self.snapshot()
+        return new, (new != value)
+
+    def _slider(self, sid, rect, value, lo=0.0, hi=1.0):
+        """Barra de progreso arrastrable (posicion absoluta). Devuelve (val, chg).
+        No toca el historial (es un ajuste de vista)."""
+        hot = rect.collidepoint(self.mouse)
+        active = self.active_scrub == sid
+        if active and not self.lmb_held:
+            self.active_scrub = None
+            active = False
+        elif self.lmb_down and hot and self.active_scrub is None:
+            self.active_scrub = sid
+            active = True
+        new = value
+        if active:
+            t = (self.mouse[0] - rect.x) / max(1, rect.w)
+            new = lo + max(0.0, min(1.0, t)) * (hi - lo)
+        t = (new - lo) / (hi - lo) if hi > lo else 0.0
+        t = max(0.0, min(1.0, t))
+        track = pygame.Rect(rect.x, rect.centery - 3, rect.w, 6)
+        pygame.draw.rect(self.screen, (34, 36, 44), track, border_radius=3)
+        fw = int(rect.w * t)
+        if fw > 0:
+            pygame.draw.rect(self.screen, ACCENT,
+                             (rect.x, rect.centery - 3, fw, 6), border_radius=3)
+        kx = rect.x + fw
+        pygame.draw.circle(self.screen, (245, 247, 250), (kx, rect.centery), 7)
+        pygame.draw.circle(self.screen, LINE, (kx, rect.centery), 7, 1)
         return new, (new != value)
 
     # ====================================================================
@@ -3072,6 +3358,33 @@ class App:
                 ("page", "Proyecto en blanco",
                  "Empezar de cero, sin plantilla", self.new_blank_project),
             ])
+        elif kind == "cargpreview":
+            img = self._cargable_preview_surface(scale=3)
+            mw = max(300, (img.get_width() if img else 200) + 40)
+            mh = (img.get_height() if img else 160) + 92
+            r = pygame.Rect((w - mw) // 2, (h - mh) // 2, mw, mh)
+            pygame.draw.rect(self.screen, PANEL, r, border_radius=10)
+            pygame.draw.rect(self.screen, ACCENT, r, 2, border_radius=10)
+            self.text("Preview en el body estandar", (r.x + 16, r.y + 12), ACCENT,
+                      font=self.font_b)
+            self.text("maletin (frame 2) detras del body · brazos (frame 1) delante",
+                      (r.x + 16, r.y + 32), DIM, font=self.font_s)
+            if img is not None:
+                self._draw_checker(pygame.Rect(r.x + 20, r.y + 52,
+                                               img.get_width(), img.get_height()))
+                self.screen.blit(img, (r.x + 20, r.y + 52))
+            else:
+                self.text("Sin body de referencia o sin frames.",
+                          (r.x + 20, r.y + 60), DIM, font=self.font_s)
+            # switch (pastilla) quitar/poner camisa de guia + cerrar
+            half = (mw - 32 - 8) // 2
+            sw = pygame.Rect(r.x + 16, r.bottom - 36, half, 26)
+            name = self._shirt_label().split(": ", 1)[-1]
+            if self._switch(sw, self.shirt_idx >= 0, f"Camisa  {name}"):
+                self._toggle_shirt()
+            cr = pygame.Rect(sw.right + 8, r.bottom - 34, r.right - 16 - sw.right - 8, 24)
+            if self.button(cr, "Cerrar (Esc)"):
+                self.modal = None
         elif kind == "newitem":
             self._modal_menu("Nuevo item",
                              "Se usa el body estandar como guia (fantasma)", [
@@ -3081,6 +3394,9 @@ class App:
                 ("face", "Caracteristica",
                  "Cara / pelo por conexion (socket)",
                  lambda: self.new_item_project("caracteristica")),
+                ("box", "Cargable / Sujetable",
+                 "Mochila, antorcha... 2 frames: atras + adelante",
+                 lambda: self.new_item_project("cargable")),
             ], back=("newkind", None))
         self._drawing_modal = False
 
@@ -3139,9 +3455,19 @@ class App:
         self._draw_grid(box)
         pygame.draw.rect(self.screen, ACCENT, box, 1)
 
-        self._draw_ghost_body()           # body de guia (item), por detras
+        # body de guia (fantasma). Para ROPA, si el body define clothes_z, se
+        # parte: lo de ATRAS detras de la prenda y lo de ADELANTE (brazo del
+        # frente) ENCIMA -> ves la profundidad real mientras editas.
+        back, front = self._ghost_bands()
+        self._draw_ghost_body(back)
+        if self.project.kind == "cargable":      # camisa de guia sobre el body
+            self._draw_shirt_overlay()
         render.draw_sprites(self.screen, self.project, self.active_frame(),
                             self.w2s, zoom=self.zoom)
+        if front:
+            self._draw_ghost_body(front)
+        if self.show_z and not self.playing:
+            self._draw_z_overlay()
 
         if self.show_bones:
             if self.playing:
@@ -3175,6 +3501,7 @@ class App:
         fr = ("Reposo" if self.cur_frame < 0
               else f"Frame {self.cur_frame+1}/{len(self.frames)}")
         self.text(fr, (c.right - 10, c.y + 8), TEXT, font=self.font_b, right=True)
+        self._draw_ghost_controls()
 
     def _scale_mode_rects(self):
         c = self.r_canvas
@@ -3278,18 +3605,158 @@ class App:
             sx, sy = self.w2s(wx, wy)
             self._socket_marker(int(sx), int(sy), b.name, False)
 
-    def _draw_ghost_body(self):
-        """Dibuja el body de referencia (semi-transparente) detras del item, como
-        guia. Ropa: posado con el frame actual (rig compartido). Caracteristica:
-        en reposo (la pieza solo se dibuja una vez)."""
+    def _front_band_ids(self, pr):
+        """Indices de sprites que van en la banda DELANTE de la ropa.
+        - body: las partes con z > clothes_z.
+        - ropa: las partes cuyo HUESO del body tiene z > clothes_z (la manga
+          enlazada al brazo del frente se va sola al frente). Automatico."""
+        if pr.kind == "body" and pr.clothes_z is not None:
+            return {i for i, s in enumerate(pr.sprites) if s.z > pr.clothes_z}
+        if pr.kind == "ropa" and self.ref_project is not None \
+                and self.ref_project.clothes_z is not None:
+            cz = self.ref_project.clothes_z
+            bone_z = {}                       # hueso -> z maximo del body en el
+            for s in self.ref_project.sprites:
+                if s.bone:
+                    bone_z[s.bone] = max(bone_z.get(s.bone, -1e9), s.z)
+            return {i for i, s in enumerate(pr.sprites)
+                    if s.bone and bone_z.get(s.bone, -1e9) > cz}
+        return set()
+
+    def _ghost_bands(self):
+        """(back, front): filtros de sprites del body de referencia partidos por
+        su clothes_z, para dibujar lo de adelante SOBRE la prenda. (None, None) si
+        no aplica (sin clothes_z o no es ropa)."""
+        rp = self.ref_project
+        cz = getattr(rp, "clothes_z", None) if rp else None
+        if cz is None or self.project.kind != "ropa":
+            return None, None
+        back = {i for i, s in enumerate(rp.sprites) if s.z <= cz}
+        front = {i for i, s in enumerate(rp.sprites) if s.z > cz}
+        return back, (front or None)
+
+    def _gop(self, base):
+        """Alpha del fantasma escalado por el slider (base = el maximo actual)."""
+        return max(0, min(255, int(base * self.ghost_op)))
+
+    def _z_color(self, z, zmin, zmax):
+        """Color por profundidad: azul (atras) -> verde -> naranja (frente)."""
+        t = (z - zmin) / (zmax - zmin) if zmax > zmin else 0.5
+        t = max(0.0, min(1.0, t))
+        stops = [(0.0, (60, 130, 240)), (0.5, (70, 200, 150)), (1.0, (245, 140, 70))]
+        for k in range(len(stops) - 1):
+            t0, c0 = stops[k]
+            t1, c1 = stops[k + 1]
+            if t <= t1 or k == len(stops) - 2:
+                f = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+                f = max(0.0, min(1.0, f))
+                return tuple(int(c0[j] + (c1[j] - c0[j]) * f) for j in range(3))
+        return stops[-1][1]
+
+    def _z_pill(self, pos, z, col, front):
+        """Etiqueta del z de una parte: pastilla del color de profundidad. Las
+        partes DELANTE de la ropa (z > clothes_z) llevan anillo blanco."""
+        txt = str(int(z))
+        r = pygame.Rect(0, 0, 22 + 6 * (len(txt) - 1), 16)
+        r.center = (int(pos[0]), int(pos[1]))
+        pygame.draw.rect(self.screen, (16, 18, 24), r.inflate(4, 4), border_radius=8)
+        pygame.draw.rect(self.screen, col, r, border_radius=8)
+        if front:
+            pygame.draw.rect(self.screen, (255, 255, 255), r, 2, border_radius=8)
+        self.text(txt, r.center, (16, 18, 24), font=self.font_s, center=True)
+
+    def _draw_z_overlay(self):
+        """Pinta cada parte del body de referencia teñida por su z-index, con la
+        etiqueta del numero, y una leyenda. Para ENTENDER la profundidad al
+        dibujar ropa/maletines (que tapa a que)."""
+        rp = self.ref_project
+        if rp is None or not rp.sprites:
+            return
+        parts = [(i, s) for i, s in enumerate(rp.sprites)
+                 if s.visible and s.surface is not None and s.content_rect]
+        if not parts:
+            return
+        zs = [s.z for _, s in parts]
+        zmin, zmax = min(zs), max(zs)
+        cz = getattr(rp, "clothes_z", None)
+        frame = self._ref_idle_frame()
+        box = (rp.box_x, rp.box_y, rp.tile_w, rp.tile_h)
+        bx, by = box[0], box[1]
+        sw = max(1, int(rp.tile_w * self.zoom))
+        sh = max(1, int(rp.tile_h * self.zoom))
+        labels = []
+        for i, s in sorted(parts, key=lambda t: t[1].z):     # atras -> adelante
+            col = self._z_color(s.z, zmin, zmax)
+            tile = render.render_tile(rp, frame, {i}, box)
+            mask = pygame.mask.from_surface(tile)
+            if mask.count() == 0:
+                continue
+            sil = mask.to_surface(setcolor=(*col, 165), unsetcolor=(0, 0, 0, 0))
+            self.screen.blit(pygame.transform.scale(sil, (sw, sh)), self.w2s(bx, by))
+            cen = mask.centroid()
+            labels.append((self.w2s(bx + cen[0], by + cen[1]), s.z, col,
+                           cz is not None and s.z > cz))
+        for pos, z, col, front in labels:        # etiquetas SOBRE las siluetas
+            self._z_pill(pos, z, col, front)
+        self._draw_z_legend(zmin, zmax, cz)
+
+    def _draw_z_legend(self, zmin, zmax, cz):
+        c = self.r_canvas
+        lw, lh = 16, 170
+        lx, ly = c.right - 78, c.y + 80
+        for k in range(lh):                       # arriba = frente, abajo = atras
+            z = zmax - (k / lh) * (zmax - zmin)
+            pygame.draw.line(self.screen, self._z_color(z, zmin, zmax),
+                             (lx, ly + k), (lx + lw, ly + k))
+        pygame.draw.rect(self.screen, LINE, (lx, ly, lw, lh), 1)
+        self.text("frente", (lx + lw + 4, ly - 2), (245, 140, 70), font=self.font_s)
+        self.text("atras", (lx + lw + 4, ly + lh - 10), (60, 130, 240),
+                  font=self.font_s)
+        if cz is not None and zmax > zmin:
+            t = (cz - zmin) / (zmax - zmin)
+            yk = ly + int((1 - max(0.0, min(1.0, t))) * lh)
+            pygame.draw.line(self.screen, (255, 255, 255),
+                             (lx - 5, yk), (lx + lw + 5, yk), 2)
+            self.text("ropa", (lx - 7, yk - 6), TEXT, font=self.font_s, right=True)
+
+    def _draw_ghost_controls(self):
+        """Slider de opacidad del fantasma + toggle del overlay de z, junto al
+        titulo 'Reposo' del lienzo. Solo al editar un item con body de guia."""
+        if not (self.is_item and self.ref_project is not None):
+            return
+        c = self.r_canvas
+        y = c.y + 7
+        # toggle z-index (pastilla clickable)
+        zr = pygame.Rect(c.right - 360, y - 4, 86, 22)
+        hot = zr.collidepoint(self.mouse)
+        active = self.show_z
+        pygame.draw.rect(self.screen, ACTIVE if active else (HOVER if hot else PANEL2),
+                         zr, border_radius=11)
+        pygame.draw.rect(self.screen, ACCENT if active else LINE, zr, 1, border_radius=11)
+        self.text("z-index", zr.center, TEXT if active else DIM,
+                  font=self.font_s, center=True)
+        if self.lmb_down and hot:
+            self.show_z = not self.show_z
+        # slider de opacidad del fantasma
+        self.text("Fantasma", (c.right - 280, y), DIM, font=self.font_s)
+        srect = pygame.Rect(c.right - 218, y, 74, 16)
+        self.ghost_op, _ = self._slider("ghostop", srect, self.ghost_op)
+        self.text(f"{int(self.ghost_op * 100)}%", (c.right - 92, y), TEXT,
+                  font=self.font_s, right=True)
+
+    def _draw_ghost_body(self, sprites_filter=None):
+        """Dibuja el body de referencia (semi-transparente) como guia. Ropa: con
+        el frame actual (rig compartido); caracteristica/cargable: en reposo.
+        `sprites_filter` limita a una banda (atras/adelante de la prenda)."""
         rp = self.ref_project
         if rp is None or not rp.sprites:
             return
         frame = (self.active_frame() if self.project.kind == "ropa"
                  else self._ref_idle_frame())
         temp = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
-        render.draw_sprites(temp, rp, frame, self.w2s, zoom=self.zoom)
-        temp.fill((255, 255, 255, 95), special_flags=pygame.BLEND_RGBA_MULT)
+        render.draw_sprites(temp, rp, frame, self.w2s, zoom=self.zoom,
+                            sprites_filter=sprites_filter)
+        temp.fill((255, 255, 255, self._gop(95)), special_flags=pygame.BLEND_RGBA_MULT)
         self.screen.blit(temp, (0, 0))
 
     def _ghost_tile_surface(self):
@@ -3443,8 +3910,8 @@ class App:
 
     PAINT_TOOLS = [("pencil", "P"), ("eraser", "E"), ("shade", "C"),
                    ("bucket", "B"), ("eyedropper", "O"), ("move", "M"),
-                   ("select", "S"), ("wand", "W"), ("line", "L"),
-                   ("curve", "J"), ("hand", "H")]
+                   ("scale", "K"), ("select", "S"), ("wand", "W"),
+                   ("line", "L"), ("curve", "J"), ("hand", "H")]
 
     def _draw_toolbar(self):
         c = self.r_canvas
@@ -3539,6 +4006,10 @@ class App:
             poly([(0, 10), (4, 6), (-4, 6)])
             poly([(-10, 0), (-6, -4), (-6, 4)])
             poly([(10, 0), (6, -4), (6, 4)])
+        elif name == "scale":           # redimensionar (flecha diagonal doble)
+            line((-7, 7), (7, -7), 2)
+            poly([(8, -8), (2, -7), (7, -2)])     # punta arriba-derecha
+            poly([(-8, 8), (-2, 7), (-7, 2)])     # punta abajo-izquierda
         elif name == "select":          # marquesina (rectangulo punteado)
             r = pygame.Rect(*P(-9, -7), 18 * u, 14 * u)
             d = max(2, int(3 * u))
@@ -3961,8 +4432,15 @@ class App:
         if self.is_item:                  # body de guia (fantasma) detras del dibujo
             ghost = self._ghost_tile_surface()
             if ghost is not None:
+                ghost = ghost.copy()
+                rp = self.ref_project
+                if self.project.kind == "cargable" and rp is not None:
+                    ov = self._shirt_overlay()    # camisa de guia, sobre el body
+                    if ov is not None:
+                        frame, ox, oy = ov
+                        ghost.blit(frame, (-rp.box_x - ox, -rp.box_y - oy))
                 g = pygame.transform.scale(ghost, rect.size)
-                g.fill((255, 255, 255, 90), special_flags=pygame.BLEND_RGBA_MULT)
+                g.fill((255, 255, 255, self._gop(90)), special_flags=pygame.BLEND_RGBA_MULT)
                 self.screen.blit(g, rect.topleft)
         self.screen.blit(pygame.transform.scale(sp.surface, rect.size),
                          rect.topleft)
@@ -4473,6 +4951,16 @@ class App:
                                  ("box_x", "Caja X"), ("box_y", "Caja Y")):
                     self._num_field(x, w, y, key, lbl, getattr(self.project, key))
                     y += 26
+                if self.project.kind == "body":
+                    self.text("Profundidad de la ropa (0 = off):", (x, y), DIM,
+                              font=self.font_s)
+                    y += 16
+                    self.text("partes con z MAYOR van DELANTE de la ropa",
+                              (x, y), DIM, font=self.font_s)
+                    y += 16
+                    self._num_field(x, w, y, "clothes_z", "Z ropa",
+                                    self.project.clothes_z or 0)
+                    y += 26
 
         self._right_content_h = y - y0 + 8
         self.screen.set_clip(None)
@@ -4805,6 +5293,15 @@ class App:
         if self._icon_button(pygame.Rect(tx, ty, 24, 20), "trash"):
             self.delete_clip(self.cur_clip)         # borrar incluso la ultima
         tx += 28
+        if self.project.kind == "cargable":         # ver el cargable sobre el body
+            if self.button(pygame.Rect(tx, ty, 110, 20), "Preview en body"):
+                self.modal = ("cargpreview", None)
+            tx += 116
+            # camisa de guia: cicla (ninguna -> cada camisa exportada) para
+            # alinear las correas con/sin camisa puesta.
+            if self.button(pygame.Rect(tx, ty, 150, 20), self._shirt_label()):
+                self._cycle_shirt()
+            tx += 156
         # tamano de frame de ESTA animacion (atacar puede necesitar mas ancho)
         if self.clip:
             self.text("Frame", (tx, ty + 4), DIM, font=self.font_s)
@@ -4947,6 +5444,8 @@ class App:
             "P lapiz  E borrador  C sombra/brillo  B bote  O cuentagotas  M mover",
             "L linea  J curva B-spline  S seleccion rectangular  W vara magica  H mano",
             "Mover (M): arrastra para desplazar la capa (o lo seleccionado).",
+            "Escalar (K): arrastra horizontal para agrandar/achicar lo dibujado en",
+            "   la capa (desde su centro, nitido). Suelta para fijar.",
             "[ ] o Ctrl+rueda = tamano de pincel    X = cambia color activo/2do",
             "Curva: clic agrega nodos; clic derecho o Enter cierra; Esc cancela.",
             "Seleccion (S): arrastra un rectangulo (Shift suma, Ctrl resta); arrastra",

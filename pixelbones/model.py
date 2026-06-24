@@ -282,6 +282,10 @@ class Project:
         self.kind = "body"
         self.ref_body = None       # ruta/sentinela "@standard" del body de guia
         self.export_crop_h = None  # alto de exportacion recortado (caracteristica)
+        # body: z UMBRAL para la profundidad de la ropa. Las partes con z MAYOR
+        # se exportan a una banda aparte (<name>_frente.png) que el juego dibuja
+        # DESPUES de la ropa (p.ej. el brazo del frente sobre la camisa). None=off.
+        self.clothes_z = None
 
     # -- utilidades ----------------------------------------------------------
     def bone_by_name(self, name):
@@ -341,6 +345,8 @@ class Project:
             d["ref_body"] = self.ref_body
             if self.export_crop_h:
                 d["export_crop_h"] = self.export_crop_h
+        if self.clothes_z is not None:
+            d["clothes_z"] = self.clothes_z
         return d
 
     @classmethod
@@ -354,6 +360,7 @@ class Project:
         pr.kind = d.get("kind", "body")
         pr.ref_body = d.get("ref_body")
         pr.export_crop_h = d.get("export_crop_h")
+        pr.clothes_z = d.get("clothes_z")
         if "sprites" in d or "bones" in d:
             pr.sprites = [Sprite.from_dict(s) for s in d.get("sprites", [])]
             pr.bones = [Bone.from_dict(b) for b in d.get("bones", [])]

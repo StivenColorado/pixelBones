@@ -5,6 +5,7 @@ al iniciar para que los dialogos puedan dibujarse sobre la ventana.
 
 from __future__ import annotations
 import os
+from . import config
 from .filebrowser import FileBrowser, IMG_EXTS
 
 HOST = None
@@ -16,15 +17,38 @@ def set_host(app):
     HOST = app
 
 
-def _run(start_dir=None, **kw):
+def _ensure_last_dir():
+    """Carga (una vez) la ultima carpeta usada desde config, si aun no esta."""
     global _LAST_DIR
+    if _LAST_DIR is None:
+        d = config.load().get("last_dir")
+        if d and os.path.isdir(d):
+            _LAST_DIR = d
+
+
+def _remember(d):
+    """Guarda la ultima carpeta en memoria y la PERSISTE en config (sin pisar
+    las otras claves), para recordarla entre sesiones."""
+    global _LAST_DIR
+    _LAST_DIR = d
+    try:
+        cfg = config.load()
+        if cfg.get("last_dir") != d:
+            cfg["last_dir"] = d
+            config.save(cfg)
+    except Exception:
+        pass
+
+
+def _run(start_dir=None, **kw):
+    _ensure_last_dir()
     fb = FileBrowser(HOST.screen, HOST.clock, HOST.font, HOST.font_s,
                      start_dir=start_dir or _LAST_DIR, **kw)
     res = fb.run()
-    # recordar la carpeta usada para el proximo dialogo
+    # recordar la carpeta usada para el proximo dialogo (y para la proxima sesion)
     ref = res[0] if isinstance(res, list) and res else res
     if isinstance(ref, str):
-        _LAST_DIR = ref if os.path.isdir(ref) else os.path.dirname(ref)
+        _remember(ref if os.path.isdir(ref) else os.path.dirname(ref))
     return res
 
 
