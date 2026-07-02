@@ -30,30 +30,40 @@ def ensure_layers(sprite, default_size=(64, 128)):
     sprite.active_layer = 0
 
 
-def flatten_sprite(sprite):
-    """Compone las capas visibles en sprite.surface y recomputa content_rect."""
+def flatten_sprite(sprite, recompute_bbox=True):
+    """Compone las capas visibles en sprite.surface y recomputa content_rect.
+
+    Optimizado para lienzos grandes:
+    - una sola capa visible a opacidad plena -> se COMPARTE su surface (sin
+      copiar ni blittear 1.7M px por trazo);
+    - recompute_bbox=False salta el get_bounding_rect (escaneo de toda la hoja),
+      que en un trazo continuo se difiere hasta soltar el mouse.
+    """
     if not sprite.layers or sprite.layers[0].surface is None:
         sprite.surface = None
         sprite.size = (0, 0)
         sprite.content_rect = None
         return
     w, h = sprite.layers[0].surface.get_size()
-    comp = pygame.Surface((w, h), pygame.SRCALPHA)
-    for lay in sprite.layers:
-        if not lay.visible or lay.surface is None:
-            continue
-        s = lay.surface
-        if lay.opacity < 0.999:
-            s = lay.surface.copy()
-            a = max(0, min(255, int(255 * lay.opacity)))
-            s.fill((255, 255, 255, a), special_flags=pygame.BLEND_RGBA_MULT)
-        comp.blit(s, (0, 0))
-    sprite.surface = comp
+    vis = [l for l in sprite.layers if l.visible and l.surface is not None]
+    if len(vis) == 1 and vis[0].opacity >= 0.999:
+        sprite.surface = vis[0].surface          # comparte: rapido (sin copia)
+    else:
+        comp = pygame.Surface((w, h), pygame.SRCALPHA)
+        for lay in vis:
+            s = lay.surface
+            if lay.opacity < 0.999:
+                s = lay.surface.copy()
+                a = max(0, min(255, int(255 * lay.opacity)))
+                s.fill((255, 255, 255, a), special_flags=pygame.BLEND_RGBA_MULT)
+            comp.blit(s, (0, 0))
+        sprite.surface = comp
     sprite.size = (w, h)
-    bb = comp.get_bounding_rect(min_alpha=1)
-    if bb.width == 0 or bb.height == 0:
-        bb = comp.get_rect()
-    sprite.content_rect = (bb.x, bb.y, bb.width, bb.height)
+    if recompute_bbox or sprite.content_rect is None:
+        bb = sprite.surface.get_bounding_rect(min_alpha=1)
+        if bb.width == 0 or bb.height == 0:
+            bb = sprite.surface.get_rect()
+        sprite.content_rect = (bb.x, bb.y, bb.width, bb.height)
 
 
 def load_sprite_surface(sprite, default_size=(64, 128)):

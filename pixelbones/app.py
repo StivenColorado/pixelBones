@@ -216,6 +216,18 @@ class App:
             self.import_dropped(dropped)
         self.layout()
 
+    def _save_screenshot(self):
+        # F12: guarda la ventana del editor en docs/screenshots/ (PNG).
+        # ponytail: contador en vez de timestamp, sin depender de la hora.
+        out = os.path.join(os.getcwd(), "docs", "screenshots")
+        os.makedirs(out, exist_ok=True)
+        n = 1
+        while os.path.isfile(os.path.join(out, f"shot_{n:03d}.png")):
+            n += 1
+        path = os.path.join(out, f"shot_{n:03d}.png")
+        pygame.image.save(self.screen, path)
+        self.status = f"Captura guardada: docs/screenshots/shot_{n:03d}.png"
+
     def _hotkey(self, key):
         if self.modal is not None:
             if key == pygame.K_ESCAPE:
@@ -249,6 +261,9 @@ class App:
             return
         if key == pygame.K_F1:
             self.show_help = not self.show_help
+            return
+        if key == pygame.K_F12:
+            self._save_screenshot()
             return
         if self.mode == "paint":
             self._hotkey_paint(key)
@@ -1292,13 +1307,9 @@ class App:
             if layer is None:
                 return
             if self.paint.sel_mask is not None:     # copiar solo lo seleccionado
-                w, h = layer.surface.get_size()
-                surf = pygame.Surface((w, h), pygame.SRCALPHA)
-                m = self.paint.sel_mask
-                for yy in range(h):
-                    for xx in range(w):
-                        if m.get_at((xx, yy)):
-                            surf.set_at((xx, yy), layer.surface.get_at((xx, yy)))
+                # mask -> surface a velocidad C (sin bucle Python por pixel).
+                surf = self.paint.sel_mask.to_surface(
+                    setsurface=layer.surface, unsetcolor=(0, 0, 0, 0))
                 self.clipboard = ("pixels", surf)
                 self.status = "Seleccion copiada (pega como capa con Ctrl+V)."
             else:
@@ -2279,10 +2290,23 @@ class App:
             self.paint_undo.pop(0)
         self.paint_redo.clear()
 
-    def _after_paint(self, sp):
-        render.flatten_sprite(sp)
+    def _after_paint(self, sp, quick=False):
+        # quick=True (trazo en curso): no recalcula el bounding-box (escaneo caro
+        # de toda la hoja); se hace una vez al soltar el mouse.
+        render.flatten_sprite(sp, recompute_bbox=not quick)
         self.dirty = True
-        self._thumbs_dirty = True
+        if not quick:
+            self._thumbs_dirty = True
+
+    def _cut_by_mask(self, surf, mask):
+        """Recorta a un buffer flotante los pixeles bajo `mask` y los borra de
+        `surf`, a velocidad C (sin bucle Python por pixel: clave en lienzos
+        grandes). Devuelve el flotante (mismo tamano que surf)."""
+        flo = mask.to_surface(setsurface=surf, unsetcolor=(0, 0, 0, 0))
+        eraser = mask.to_surface(setcolor=(0, 0, 0, 0),
+                                 unsetcolor=(255, 255, 255, 255))
+        surf.blit(eraser, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        return flo
 
     def _set_color_from_hsv(self):
         import colorsys
@@ -2698,19 +2722,12 @@ class App:
         if t == "move":
             # mover toda la capa, o solo lo seleccionado si hay seleccion
             self._paint_push_undo(sp, layer)
-            W, H = layer.surface.get_size()
-            flo = pygame.Surface((W, H), pygame.SRCALPHA)
             surf = layer.surface
             if self.paint.sel_mask is not None:
-                m = self.paint.sel_mask
-                surf.lock()
-                for yy in range(H):
-                    for xx in range(W):
-                        if m.get_at((xx, yy)):
-                            flo.set_at((xx, yy), surf.get_at((xx, yy)))
-                            surf.set_at((xx, yy), (0, 0, 0, 0))
-                surf.unlock()
+                flo = self._cut_by_mask(surf, self.paint.sel_mask)
             else:
+                W, H = surf.get_size()
+                flo = pygame.Surface((W, H), pygame.SRCALPHA)
                 flo.blit(surf, (0, 0))
                 surf.fill((0, 0, 0, 0))
             self._after_paint(sp)
@@ -2742,15 +2759,7 @@ class App:
             if inside and not add and not sub:
                 # mover el contenido seleccionado (corta a un buffer flotante)
                 self._paint_push_undo(sp, layer)
-                flo = pygame.Surface((W, H), pygame.SRCALPHA)
-                m, surf = self.paint.sel_mask, layer.surface
-                surf.lock()
-                for yy in range(H):
-                    for xx in range(W):
-                        if m.get_at((xx, yy)):
-                            flo.set_at((xx, yy), surf.get_at((xx, yy)))
-                            surf.set_at((xx, yy), (0, 0, 0, 0))
-                surf.unlock()
+                flo = self._cut_by_mask(layer.surface, self.paint.sel_mask)
                 self._after_paint(sp)
                 self.drag = {"paint": True, "mode": "sel_move", "float": flo,
                              "start": (px, py)}
@@ -2835,7 +2844,7 @@ class App:
             lx, ly = self.drag["last"]
             self._stroke_to(layer, lx, ly, px, py)
             self.drag["last"] = (px, py)
-            self._after_paint(sp)
+            self._after_paint(sp, quick=True)
         elif m == "lscale":
             sp, layer = self._active_layer()
             if layer is None:
@@ -2850,7 +2859,7 @@ class App:
             cx, cy = self.drag["center"]
             new.blit(scaled, (int(round(cx - nw / 2)), int(round(cy - nh / 2))))
             layer.surface = new
-            self._after_paint(sp)
+            self._after_paint(sp, quick=True)
             self.status = f"Escalar capa x{f:.2f}"
         elif m == "shape":
             self._shape_drag()
@@ -2863,16 +2872,23 @@ class App:
             self._commit_sel_rect()
         elif m == "sel_move":
             self._commit_sel_move()
+        elif m in ("stroke", "lscale"):
+            # el trazo difirio el bounding-box (quick): recalcularlo una vez ahora.
+            sp = self.paint_target()
+            if sp is not None:
+                render.flatten_sprite(sp, recompute_bbox=True)
+                self._thumbs_dirty = True
         self.drag = None
 
     def _rect_mask(self, x0, y0, x1, y1, w, h):
-        m = pygame.mask.Mask((w, h))
         rx0, rx1 = sorted((x0, x1))
         ry0, ry1 = sorted((y0, y1))
-        for yy in range(max(0, ry0), min(h, ry1 + 1)):
-            for xx in range(max(0, rx0), min(w, rx1 + 1)):
-                m.set_at((xx, yy), 1)
-        return m
+        s = pygame.Surface((w, h), pygame.SRCALPHA)
+        rx, ry = max(0, rx0), max(0, ry0)
+        rw, rh = min(w, rx1 + 1) - rx, min(h, ry1 + 1) - ry
+        if rw > 0 and rh > 0:
+            s.fill((255, 255, 255, 255), pygame.Rect(rx, ry, rw, rh))
+        return pygame.mask.from_surface(s)
 
     def _commit_sel_rect(self):
         sp, layer = self._active_layer()
