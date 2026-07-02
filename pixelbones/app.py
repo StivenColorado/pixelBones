@@ -340,6 +340,11 @@ class App:
 
     # -- modos -----------------------------------------------------------
     def toggle_mode(self):
+        if self.mode == "paint" and self.is_tile:
+            # un tile es pintura pura: no tiene esqueleto ni modo Animar
+            self.status = ("Un tile es pintura pura (sin esqueleto): cada "
+                           "dibujo del taller es un frame de la tira.")
+            return
         if self.mode == "animate":
             self.mode = "paint"
             self.playing = False
@@ -1044,6 +1049,9 @@ class App:
         self.modal = ("template", templates.list_templates())
 
     def open_export_menu(self):
+        if self.is_tile:                     # tile: un solo formato de salida
+            self.export_tile()
+            return
         self.modal = ("export", None)
 
     def save_current_as_template(self):
@@ -1652,6 +1660,10 @@ class App:
     def is_item(self):
         return self.project.kind in ("ropa", "caracteristica", "cargable")
 
+    @property
+    def is_tile(self):
+        return self.project.kind == "tile"
+
     def new_project(self):
         # asistente: primero pregunta si es un BODY o un ITEM
         self.modal = ("newkind", None)
@@ -1724,6 +1736,38 @@ class App:
                             "arma pixelBones al exportar.")
                }.get(kind, "")
         self.status = f"{lbl} nuevo sobre el body estandar (fantasma). {tip}"
+
+    def new_tile_project(self, size=64, frames=1):
+        """Tile / material del juego: lienzo CUADRADO y pintura pura (SIN
+        esqueleto ni body de guia). Cada DIBUJO del taller es un frame de la
+        tira; se exporta plano a <root>/<assets>/tiles/<nombre>.png."""
+        self.modal = None
+        size = max(1, int(size))
+        frames = max(1, min(16, int(frames)))
+        pr = model.Project()
+        pr.kind = "tile"
+        pr.tile_w = pr.tile_h = size
+        pr.box_x, pr.box_y = 0.0, 0.0
+        pr.clips = [model.Clip("tile")]      # sin huesos ni frames de pose
+        self.project = pr
+        self._reset_for_new()
+        for i in range(frames):              # 1 dibujo = 1 frame de la tira
+            d = model.Sprite(f"frame_{i + 1}", None)
+            d.layers = [model.Layer(
+                "base", pygame.Surface((size, size), pygame.SRCALPHA))]
+            d.pivot = [size / 2.0, size / 2.0]
+            render.flatten_sprite(d)
+            pr.drawings.append(d)
+        self.draw_idx = 0
+        self.mode = "paint"                  # el tile se pinta, no se anima
+        self.playing = False
+        self.paint.sel_mask = None
+        self.line_anchor = None
+        self.paint_undo.clear()
+        self.paint_redo.clear()
+        self._fit_canvas_view()
+        self.status = (f"Tile nuevo {size}x{size} ({frames} frame/s): 1 dibujo "
+                       "= 1 frame. Pinta y usa 'Exportar' -> assets/tiles/.")
 
     # ---- referencia (body fantasma) ------------------------------------
     def _resolve_ref(self, ref):
@@ -1961,6 +2005,10 @@ class App:
         self.draw_idx = -1
         if self.is_item:                  # re-vincula el body de guia (fantasma)
             self._attach_ref_body()
+        if self.is_tile:                  # un tile se edita SIEMPRE en Pintar
+            self.mode = "paint"
+            self.draw_idx = 0 if self.project.drawings else -1
+            self._fit_canvas_view()
         self.sync_working()
         self.history.clear()
         self.dirty = False
@@ -1976,7 +2024,15 @@ class App:
         path = self.project.path
         if as_new or not path:
             start = self.src_root() if (self.project_root and not path) else None
+            if start and self.is_tile:       # los tiles viven en <src>/tiles/
+                start = os.path.join(start, "tiles")
+                try:
+                    os.makedirs(start, exist_ok=True)
+                except OSError:
+                    pass
             path = dialogs.save_project_as(start_dir=start)
+            if path and self.is_tile:
+                path = self._nest_tile_path(path)
         if not path:
             return
         try:
@@ -2002,7 +2058,65 @@ class App:
         else:
             pr.save(path)
 
+    def _nest_tile_path(self, path):
+        """Convencion tile: <src>/tiles/<nombre>/<nombre>.pbproj (cada tile en
+        su carpeta). Si el usuario guardo directo en .../tiles/, crea la
+        carpeta del tile y anida el archivo. Fuera de ahi, no toca la ruta."""
+        src = self.src_root()
+        if not src:
+            return path
+        tiles = os.path.normcase(os.path.abspath(os.path.join(src, "tiles")))
+        d = os.path.dirname(os.path.abspath(path))
+        if os.path.normcase(d) != tiles:
+            return path
+        name = os.path.splitext(os.path.basename(path))[0]
+        nested = os.path.join(d, name)
+        os.makedirs(nested, exist_ok=True)
+        return os.path.join(nested, name + ".pbproj")
+
+    def _tile_export_path(self):
+        """Ruta de export de un TILE: <root>/<assets>/tiles/<nombre>.png,
+        PLANA (asi la consume TILE_TYPES del juego), sea cual sea la
+        subcarpeta bajo <src>/ donde viva el .pbproj. None si no aplica."""
+        if not (self.project_root and self.project.path):
+            return None
+        src = os.path.abspath(self.src_root())
+        p = os.path.abspath(self.project.path)
+        if not p.startswith(src + os.sep):
+            return None
+        name = os.path.splitext(os.path.basename(p))[0]
+        return os.path.join(self.project_root, self.assets_dir, "tiles",
+                            name + ".png")
+
+    def export_tile(self):
+        """Exporta el tile COMO LO CONSUME EL JUEGO: 1 frame = PNG cuadrado
+        simple; N frames = tira HORIZONTAL de frames cuadrados (fogata.png =
+        9x64 -> 576x64). Sin animacion.json (los tiles no lo usan)."""
+        pr = self.project
+        render.ensure_surfaces(pr)
+        if not pr.drawings:
+            self.status = "No hay frames que exportar (crea un dibujo en Pintar)."
+            return
+        auto = self._tile_export_path()      # espejo art-src -> assets/tiles/
+        if auto:
+            path = auto
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        else:
+            path = dialogs.save_png_as()
+            if not path:
+                return
+        try:
+            sz, n = render.export_tile_strip(pr, path)
+            shown = (os.path.relpath(path, self.project_root)
+                     if self.project_root and auto else os.path.basename(path))
+            self.status = f"Tile exportado {sz[0]}x{sz[1]} ({n} frame/s) -> {shown}"
+        except Exception as e:
+            self.status = f"Error export: {e}"
+
     def export_composite(self):
+        if self.is_tile:                     # un tile solo exporta la tira
+            self.export_tile()
+            return
         if not self.project.sprites:
             self.status = "No hay imagenes para exportar."
             return
@@ -2473,7 +2587,8 @@ class App:
     def new_drawing(self):
         self.snapshot()
         w, h = self.project.tile_w, self.project.tile_h
-        d = model.Sprite(self._unique_drawing_name("dibujo"), None)
+        base = "frame" if self.is_tile else "dibujo"
+        d = model.Sprite(self._unique_drawing_name(base), None)
         d.layers = [model.Layer("base", pygame.Surface((w, h), pygame.SRCALPHA))]
         d.pivot = [w / 2.0, h / 2.0]
         render.flatten_sprite(d)
@@ -2483,7 +2598,9 @@ class App:
         self.paint_redo.clear()
         self._fit_canvas_view()
         self._thumbs_dirty = True
-        self.status = "Dibujo nuevo. Pinta y luego 'Enviar como material'."
+        self.status = ("Frame nuevo agregado a la tira del tile."
+                       if self.is_tile else
+                       "Dibujo nuevo. Pinta y luego 'Enviar como material'.")
 
     def resize_active_drawing(self, w, h):
         """Redimensiona el lienzo del dibujo activo a (w,h), conservando el
@@ -2539,6 +2656,10 @@ class App:
         conservando sus props de animacion (hueso, posicion, ESCALA, z, conexion)
         y solo cambiando los pixeles. Asi no duplica y el cambio se ve en todas
         las animaciones. Solo las capas sin material previo crean uno nuevo."""
+        if self.is_tile:
+            self.status = ("Tile: los dibujos YA son los frames de la tira; "
+                           "usa 'Exportar' (no hay materiales que enviar).")
+            return
         d = self.paint_target()
         if d is None or not d.layers:
             self.status = "No hay dibujo que enviar."
@@ -3375,6 +3496,10 @@ class App:
                 ("box", "Item nuevo",
                  "Ropa o caracteristica, sobre el body estandar",
                  lambda: setattr(self, "modal", ("newitem", None))),
+                ("grid", "Tile / material",
+                 "Terreno y construccion para el juego (pasto, piedra, muros...)",
+                 lambda: setattr(self, "modal",
+                                 ("newtile", {"size": 64, "frames": 1}))),
                 ("page", "Proyecto en blanco",
                  "Empezar de cero, sin plantilla", self.new_blank_project),
             ])
@@ -3418,6 +3543,8 @@ class App:
                  "Mochila, antorcha... 2 frames: atras + adelante",
                  lambda: self.new_item_project("cargable")),
             ], back=("newkind", None))
+        elif kind == "newtile":
+            self._modal_newtile(data)
         elif kind == "syncbodies":
             self._modal_syncbodies(data)
         self._drawing_modal = False
@@ -3459,6 +3586,59 @@ class App:
         cr = pygame.Rect(r.x + 16, r.bottom - 32, mw - 32, 24)
         if self.button(cr, "‹ Atras" if back else "Cancelar (Esc)"):
             self.modal = back
+
+    def _modal_newtile(self, data):
+        """Modal: tamano (lienzo cuadrado) y frames del nuevo tile/material."""
+        w, h = self.screen.get_size()
+        d = data if isinstance(data, dict) else {}
+        d.setdefault("size", 64)
+        d.setdefault("frames", 1)
+        mw, mh = 460, 262
+        r = pygame.Rect((w - mw) // 2, (h - mh) // 2, mw, mh)
+        sh = pygame.Surface((r.w + 16, r.h + 16), pygame.SRCALPHA)
+        sh.fill((0, 0, 0, 120))
+        self.screen.blit(sh, (r.x - 8, r.y - 4))
+        pygame.draw.rect(self.screen, PANEL, r, border_radius=12)
+        pygame.draw.rect(self.screen, ACCENT, r, 2, border_radius=12)
+        self.text("Nuevo tile / material", (r.x + 20, r.y + 16), ACCENT,
+                  font=self.font_b)
+        self.text("Terreno y construccion para el juego (pasto, piedra, muros...)",
+                  (r.x + 20, r.y + 38), DIM, font=self.font_s)
+        # -- tamano del lienzo (los tiles del juego son CUADRADOS) --
+        y = r.y + 66
+        self.text("Tamaño (px)", (r.x + 20, y + 1), TEXT, font=self.font_s)
+        bx = r.x + 130
+        bw = (r.right - 20 - bx - 3 * 8) // 4
+        for s in (16, 32, 64, 128):
+            if self.button(pygame.Rect(bx, y - 4, bw, 26), str(s),
+                           active=d["size"] == s):
+                d["size"] = s
+            bx += bw + 8
+        # -- frames (1 = estatico; mas = tira horizontal animada) --
+        y += 40
+        self.text("Frames", (r.x + 20, y + 1), TEXT, font=self.font_s)
+        minus = pygame.Rect(r.x + 130, y - 4, 26, 26)
+        plus = pygame.Rect(minus.right + 56, y - 4, 26, 26)
+        if self.button(minus, "-", enabled=d["frames"] > 1):
+            d["frames"] = max(1, d["frames"] - 1)
+        self.text(str(d["frames"]), ((minus.right + plus.x) // 2, minus.centery),
+                  TEXT, font=self.font_b, center=True)
+        if self.button(plus, "+", enabled=d["frames"] < 16):
+            d["frames"] = min(16, d["frames"] + 1)
+        self.text(f"PNG: {d['frames'] * d['size']}x{d['size']}",
+                  (r.right - 20, minus.centery), DIM, font=self.font_s, right=True)
+        y += 34
+        self.text("1 = tile estatico · 2-16 = tira animada (la fogata usa 9)",
+                  (r.x + 20, y), DIM, font=self.font_s)
+        # -- crear / volver --
+        cr = pygame.Rect(r.x + 16, r.bottom - 66, mw - 32, 28)
+        if self.button(cr, f"Crear tile {d['size']}x{d['size']} · "
+                           f"{d['frames']} frame/s", active=True):
+            self.new_tile_project(d["size"], d["frames"])
+            return
+        br = pygame.Rect(r.x + 16, r.bottom - 32, mw - 32, 24)
+        if self.button(br, "‹ Atras"):
+            self.modal = ("newkind", None)
 
     # -- sincronizar conexiones/animaciones a otros bodies ----------------
     def _open_syncbodies(self):
@@ -4317,6 +4497,12 @@ class App:
             circ((-3, -2), 1.3, 0); circ((3, -2), 1.3, 0)    # ojos
             line((-1, 0), (-2, 3), 1)                        # nariz
             line((-3, 5), (3, 5), 1)                         # boca
+        elif name == "grid":                                 # tile (rejilla 2x2)
+            pygame.draw.rect(self.screen, col,
+                             pygame.Rect(*P(-10, -10), 20 * u, 20 * u), 1)
+            line((0, -10), (0, 10), 1)
+            line((-10, 0), (10, 0), 1)
+            poly([(-9, -9), (-1, -9), (-1, -1), (-9, -1)])   # celda pintada
 
     def _tool_btn(self, rect, tool):
         active = self.tool == tool
@@ -4766,12 +4952,17 @@ class App:
         p = self.r_left
         pygame.draw.rect(self.screen, PANEL, p)
         split = p.y + int(p.h * self.left_split)
-        # ---- DIBUJOS (taller) ----
-        self.text("DIBUJOS", (p.x + 10, p.y + 8), ACCENT, font=self.font_b)
+        # ---- DIBUJOS (taller) / FRAMES (tile) ----
+        self.text("FRAMES" if self.is_tile else "DIBUJOS",
+                  (p.x + 10, p.y + 8), ACCENT, font=self.font_b)
         if self.button(pygame.Rect(p.x + 8, p.y + 28, 78, 24), "+ Nuevo"):
             self.new_drawing()
-        if self.button(pygame.Rect(p.x + 90, p.y + 28, p.w - 98, 24),
-                       "Enviar capas", active=self.paint_target() is not None):
+        if self.is_tile:                     # tile: 1 dibujo = 1 frame de la tira
+            if self.button(pygame.Rect(p.x + 90, p.y + 28, p.w - 98, 24),
+                           "Exportar tile", active=bool(self.project.drawings)):
+                self.export_tile()
+        elif self.button(pygame.Rect(p.x + 90, p.y + 28, p.w - 98, 24),
+                         "Enviar capas", active=self.paint_target() is not None):
             self.send_drawing_as_material()
         dtop = p.y + 56
         drect = pygame.Rect(p.x, dtop, p.w, max(20, split - dtop - 4))

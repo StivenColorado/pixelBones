@@ -296,6 +296,25 @@ def export_part(project, png_path, margin=1):
     return sheet.get_size(), conn
 
 
+def export_tile_strip(project, out_path):
+    """Tile/material del juego (kind='tile'): tira HORIZONTAL de frames
+    CUADRADOS, 1 DIBUJO del taller = 1 frame (en orden). Con un solo dibujo
+    sale un PNG cuadrado simple (los tiles estaticos de 64x64); con N sale
+    N*size x size (el formato de fogata.png). Sin metadata: el juego los
+    referencia por ruta con fw/fh en TILE_TYPES.
+    Devuelve ((w, h), n_frames)."""
+    size = max(1, int(round(project.tile_w)))
+    frames = [d for d in getattr(project, "drawings", [])
+              if d.surface is not None]
+    n = max(1, len(frames))
+    sheet = pygame.Surface((n * size, size), pygame.SRCALPHA)
+    for i, d in enumerate(frames):
+        # recorta al cuadrado del tile (por si el lienzo se redimensiono)
+        sheet.blit(d.surface, (i * size, 0), pygame.Rect(0, 0, size, size))
+    pygame.image.save(sheet, out_path)
+    return sheet.get_size(), len(frames)
+
+
 def export_per_layer(project, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     written = []
