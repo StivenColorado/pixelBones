@@ -15,6 +15,7 @@ import uuid
 import pygame
 
 from . import model, render, dialogs, recovery, paint, config, appicon, templates
+from . import syncbodies
 from .history import History
 
 # ---- tema -----------------------------------------------------------------
@@ -3417,6 +3418,8 @@ class App:
                  "Mochila, antorcha... 2 frames: atras + adelante",
                  lambda: self.new_item_project("cargable")),
             ], back=("newkind", None))
+        elif kind == "syncbodies":
+            self._modal_syncbodies(data)
         self._drawing_modal = False
 
     def _modal_menu(self, title, subtitle, cards, back=None):
@@ -3456,6 +3459,173 @@ class App:
         cr = pygame.Rect(r.x + 16, r.bottom - 32, mw - 32, 24)
         if self.button(cr, "‹ Atras" if back else "Cancelar (Esc)"):
             self.modal = back
+
+    # -- sincronizar conexiones/animaciones a otros bodies ----------------
+    def _open_syncbodies(self):
+        """Abre el modal para copiar las conexiones (anchors) y animaciones
+        nuevas de este body al resto de bodies de art-src/characters/body."""
+        src = self.src_root()
+        p = os.path.abspath(self.project.path) if self.project.path else None
+        if not (self.project_root and src and p):
+            self.status = ("Sincronizar: define el proyecto y guarda el body "
+                           f"bajo {self.src_dir}/characters/body primero.")
+            return
+        body_dir = os.path.abspath(os.path.join(src, "characters", "body"))
+        if not p.startswith(body_dir + os.sep):
+            self.status = ("Sincronizar: solo disponible con un body de "
+                           f"{self.src_dir}/characters/body abierto.")
+            return
+        bodies = [(nm, pth) for nm, pth in
+                  syncbodies.list_bodies(self.project_root, self.src_dir)
+                  if os.path.abspath(pth) != p]
+        self.modal = ("syncbodies", {"bodies": bodies, "sel": set(),
+                                     "anchors": True, "clips": True,
+                                     "reexport": True, "results": None,
+                                     "scroll": 0})
+
+    def _run_syncbodies(self, data):
+        """Ejecuta la sincronizacion y deja el modal en modo resultados."""
+        if self.dirty:                    # el origen debe estar en disco
+            self.save_project()
+        paths = [pth for _, pth in data["bodies"] if pth in data["sel"]]
+        try:
+            res = syncbodies.sync_to_bodies(
+                self.project, paths, sync_anchors=data["anchors"],
+                sync_clips=data["clips"], reexport=data["reexport"],
+                src_dir=self.src_dir, assets_dir=self.assets_dir)
+        except Exception as e:
+            self.status = f"Error al sincronizar: {e}"
+            return
+        data["results"] = res
+        data["scroll"] = 0
+        ok = sum(1 for it in res if it.get("ok"))
+        exp = sum(1 for it in res if it.get("exported"))
+        msg = f"{ok}/{len(res)} bodies sincronizados"
+        if data["reexport"]:
+            msg += (" y exportados" if exp == len(res)
+                    else f" ({exp} exportados)")
+        self.status = msg
+
+    def _modal_syncbodies(self, data):
+        """Modal: elegir bodies destino + opciones; luego muestra resultados."""
+        w, h = self.screen.get_size()
+        if data.get("plan") is None:
+            data["plan"] = syncbodies.plan_sync(self.project)
+        plan = data["plan"]
+        origin = os.path.basename(os.path.dirname(self.project.path or "")) or "?"
+        results = data["results"]
+        mw = 480
+        if results is None:
+            vis = min(max(1, len(data["bodies"])), 8)
+            list_h = vis * 34
+            mh = 240 + list_h
+        else:
+            vis = min(max(1, len(results)), 7)
+            list_h = vis * 44
+            mh = 122 + list_h
+        r = pygame.Rect((w - mw) // 2, (h - mh) // 2, mw, mh)
+        sh = pygame.Surface((r.w + 16, r.h + 16), pygame.SRCALPHA)
+        sh.fill((0, 0, 0, 120))
+        self.screen.blit(sh, (r.x - 8, r.y - 4))
+        pygame.draw.rect(self.screen, PANEL, r, border_radius=12)
+        pygame.draw.rect(self.screen, ACCENT, r, 2, border_radius=12)
+        self.text("Sincronizar conexiones", (r.x + 20, r.y + 16), ACCENT,
+                  font=self.font_b)
+        self.text(f"Origen: {origin} · {len(plan.get('anchors', []))} "
+                  f"conexiones, {len(plan.get('clips', []))} animaciones",
+                  (r.x + 20, r.y + 40), DIM, font=self.font_s)
+        x = r.x + 20
+        iw = mw - 40
+        y = r.y + 66
+        if results is None:
+            # -- vista de seleccion de destinos ---------------------------
+            bodies = data["bodies"]
+            sel = data["sel"]
+            if self.button(pygame.Rect(x, y, 90, 22), "Todos"):
+                sel.clear()
+                sel.update(pth for _, pth in bodies)
+            if self.button(pygame.Rect(x + 96, y, 90, 22), "Ninguno"):
+                sel.clear()
+            y += 30
+            lrect = pygame.Rect(x, y, iw, list_h)
+            maxs = max(0, len(bodies) - vis)
+            if self.wheel and lrect.collidepoint(self.mouse):
+                data["scroll"] -= self.wheel
+            data["scroll"] = max(0, min(maxs, data["scroll"]))
+            sc = data["scroll"]
+            if not bodies:
+                self.text("No hay otros bodies en characters/body.",
+                          (x, y + 8), DIM, font=self.font_s)
+            for i in range(sc, min(len(bodies), sc + vis)):
+                name, path = bodies[i]
+                br = pygame.Rect(x, y + (i - sc) * 34, iw - 10, 30)
+                on = path in sel
+                hot = br.collidepoint(self.mouse)
+                col = (46, 92, 64) if on else (HOVER if hot else PANEL2)
+                pygame.draw.rect(self.screen, col, br, border_radius=5)
+                pygame.draw.rect(self.screen,
+                                 (120, 210, 150) if on else LINE, br, 1,
+                                 border_radius=5)
+                self.text(name, (br.x + 10, br.centery - 7), TEXT,
+                          font=self.font_s)
+                self.text("✓" if on else "—", (br.right - 16, br.centery),
+                          (150, 220, 170) if on else DIM, font=self.font_s,
+                          center=True)
+                if self.lmb_down and hot:
+                    if on:
+                        sel.discard(path)
+                    else:
+                        sel.add(path)
+            self._scrollbar(lrect, sc, len(bodies), vis, maxs)
+            y += list_h + 10
+            for key, lbl in (("anchors", "Conexiones"),
+                             ("clips", "Animaciones nuevas"),
+                             ("reexport", "Re-exportar al juego")):
+                if self._switch(pygame.Rect(x, y, iw, 24), data[key], lbl):
+                    data[key] = not data[key]
+                y += 26
+            pw = (iw - 8) // 2
+            ob = pygame.Rect(x, r.bottom - 34, pw, 26)
+            if self.button(ob, f"Sincronizar ({len(sel)})",
+                           active=bool(sel), enabled=bool(sel)):
+                self._run_syncbodies(data)
+            if self.button(pygame.Rect(ob.right + 8, r.bottom - 34, pw, 26),
+                           "Cancelar (Esc)"):
+                self.modal = None
+        else:
+            # -- vista de resultados --------------------------------------
+            lrect = pygame.Rect(x, y, iw, list_h)
+            maxs = max(0, len(results) - vis)
+            if self.wheel and lrect.collidepoint(self.mouse):
+                data["scroll"] -= self.wheel
+            data["scroll"] = max(0, min(maxs, data["scroll"]))
+            sc = data["scroll"]
+            for i in range(sc, min(len(results), sc + vis)):
+                it = results[i]
+                rr = pygame.Rect(x, y + (i - sc) * 44, iw - 10, 40)
+                pygame.draw.rect(self.screen, PANEL2, rr, border_radius=5)
+                pygame.draw.rect(self.screen, LINE, rr, 1, border_radius=5)
+                ok = bool(it.get("ok"))
+                self.text("✓" if ok else "✗", (rr.x + 14, rr.centery),
+                          (120, 210, 150) if ok else (230, 110, 110),
+                          font=self.font_b, center=True)
+                self.text(it.get("name", "?"), (rr.x + 28, rr.y + 4), TEXT,
+                          font=self.font_s)
+                if ok:
+                    info = (f"{it.get('anchors', 0)} conexiones · "
+                            f"{it.get('clips_added', 0)} anims nuevas · "
+                            + ("exportado" if it.get("exported")
+                               else "sin exportar"))
+                    if it.get("msg"):
+                        info += f" · {it['msg']}"
+                else:
+                    info = it.get("msg", "error")
+                self.text(info[:70], (rr.x + 28, rr.y + 21),
+                          DIM if ok else (230, 140, 140), font=self.font_s)
+            self._scrollbar(lrect, sc, len(results), vis, maxs)
+            if self.button(pygame.Rect(x, r.bottom - 34, iw, 26),
+                           "Cerrar (Esc)"):
+                self.modal = None
 
     def _draw_canvas(self):
         c = self.r_canvas
@@ -5161,7 +5331,11 @@ class App:
         y += rows * (bh + 4) + 4
         self.text("Verde = colocado. Click crea/selecciona.",
                   (x + 2, y), DIM, font=self.font_s)
-        return y + 16
+        y += 20
+        if self.button(pygame.Rect(x, y, w, 24),
+                       "Sincronizar con otros bodies…"):
+            self._open_syncbodies()
+        return y + 30
 
     def _draw_assign(self, x, w, y, p):
         """Asistente: vincula tu arte a los huesos de la plantilla. Cada sprite es
